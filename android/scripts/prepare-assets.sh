@@ -14,7 +14,7 @@
 #   pet/videos/<folder>/<中文名>.mp4    旁路 alpha 动画（结构与原 videos/ 一致）
 #   pet/manifest.json                  动画名 -> {file, duration} 时长清单
 #   pet/text_clips.json                含文字动画（转向时不镜像）
-#   pet/sounds/click.wav               点击音效
+#   pet/sounds/click.wav / click2.wav     点击音效（运行时交替播放）
 #   pet/chat/*.jpg                     聊天窗口背景
 #   pet/easter/*.*                     彩蛋弹窗图片池
 #   pet/thumbs/<folder>/<名>.webp      动画缩略图（设置页动画集用）

@@ -140,6 +140,9 @@ open class PetOverlayService : Service() {
     private lateinit var catalog: PetCatalog
     private var soundPool: SoundPool? = null
     private var clickSoundId = 0
+    private var clickSoundId2 = 0
+    /** 点击音效交替播放（click.wav / click2.wav）的轮换标志 */
+    private var clickAlt = false
 
     // ---- 运行时设置快照（协程监听 DataStore 更新）----
     private var density = 1f
@@ -1130,18 +1133,29 @@ open class PetOverlayService : Service() {
             @Suppress("DEPRECATION")
             soundPool = SoundPool(3, android.media.AudioManager.STREAM_MUSIC, 0)
         }
-        clickSoundId = try {
-            val afd = assets.openFd("pet/sounds/click.wav")
-            soundPool?.load(afd, 1) ?: 0
-        } catch (e: Exception) { 0 }
+        clickSoundId = loadSound("pet/sounds/click.wav")
+        clickSoundId2 = loadSound("pet/sounds/click2.wav")
     }
+
+    /** 从 assets 加载音效；失败返回 0（不播放）。 */
+    private fun loadSound(path: String): Int = try {
+        val afd = assets.openFd(path)
+        soundPool?.load(afd, 1) ?: 0
+    } catch (e: Exception) { 0 }
 
     internal var curSoundVolume = 1f
 
+    /** 点击音效：click.wav / click2.wav 交替播放（音色更丰富） */
     private fun playClickSound() {
-        if (clickSoundId != 0) {
+        clickAlt = !clickAlt
+        val id = when {
+            clickAlt && clickSoundId2 != 0 -> clickSoundId2
+            clickSoundId != 0 -> clickSoundId
+            else -> 0
+        }
+        if (id != 0) {
             val v = curSoundVolume
-            soundPool?.play(clickSoundId, v, v, 1, 0, 1f)
+            soundPool?.play(id, v, v, 1, 0, 1f)
         }
     }
 

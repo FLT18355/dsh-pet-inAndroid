@@ -171,6 +171,7 @@ class PetMenu(
         var quickOpen by remember { mutableStateOf(false) }
         var noMove by remember { mutableStateOf(engine.noMove) }
         var lock by remember { mutableStateOf(service.curLock) }
+        var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
         var physics by remember { mutableStateOf(service.curPhysics) }
         val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
         val blurOn = blurCfg && Build.VERSION.SDK_INT >= 31
@@ -265,6 +266,14 @@ class PetMenu(
                     }
                     ToggleItem(Icons.Filled.Lock, "锁定位置", lock) {
                         lock = !lock; run { cfg.setLockPosition(lock) }
+                    }
+                    ToggleItem(Icons.Filled.Close, "无法选中", mouseThrough) {
+                        mouseThrough = !mouseThrough
+                        // 无法选中 + 锁定会令桌宠完全失联（菜单也点不开），开启时自动解除锁定
+                        run {
+                            if (mouseThrough) cfg.setLockPosition(false)
+                            cfg.setMouseThrough(mouseThrough)
+                        }
                     }
                     MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
                     MenuItem(Icons.Filled.Star, "灵动岛") { run { service.toggleIsland() } }

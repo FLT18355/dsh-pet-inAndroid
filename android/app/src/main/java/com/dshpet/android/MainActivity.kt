@@ -32,10 +32,13 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
@@ -43,6 +46,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -53,6 +57,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -75,6 +81,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -146,17 +153,45 @@ private fun SettingsScreen() {
     val cfg = PetConfig.get(ctx)
     val scope = rememberCoroutineScope()
     var tab by remember { mutableIntStateOf(0) }
-    val tabs = listOf("常规", "桌宠", "外观", "AI 对话", "快捷", "关于")
+    val tabs = listOf("常规", "桌宠", "外观", "AI", "快捷", "关于")
+    // 底部导航图标（与可用图标库对应：不额外引入扩展图标）
+    val tabIcons = listOf(
+        Icons.Filled.Settings,
+        Icons.Filled.Home,
+        Icons.Filled.Favorite,
+        Icons.Filled.Send,
+        Icons.Filled.Star,
+        Icons.Filled.Info,
+    )
     val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
     val blurOn = blurCfg && Build.VERSION.SDK_INT >= 31
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text("dsh-pet 桌宠", fontWeight = FontWeight.SemiBold)
-                        Text("Android 版 v${BuildConfig.VERSION_NAME}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // 猫爪鱼徽标：圆形渐变/主色底 + 白色小鱼
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.Favorite,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Column {
+                            Text("dsh-pet 桌宠", fontWeight = FontWeight.SemiBold)
+                            Text("Android 版 v${BuildConfig.VERSION_NAME}", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -165,18 +200,17 @@ private fun SettingsScreen() {
             )
         },
         bottomBar = {
-            Surface(shadowElevation = 8.dp) {
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                ) {
-                    tabs.forEachIndexed { i, t ->
-                        FilterChip(
-                            selected = tab == i,
-                            onClick = { tab = i },
-                            label = { Text(t, fontSize = 12.sp) },
-                        )
-                    }
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 8.dp,
+            ) {
+                tabs.forEachIndexed { i, t ->
+                    NavigationBarItem(
+                        selected = tab == i,
+                        onClick = { tab = i },
+                        icon = { Icon(tabIcons[i], contentDescription = t) },
+                        label = { Text(t, fontSize = 11.sp) },
+                    )
                 }
             }
         },
@@ -202,13 +236,25 @@ private fun SettingsScreen() {
 @Composable
 private fun Section(title: String, content: @Composable () -> Unit) {
     Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
-        Text(
-            title,
-            style = MaterialTheme.typography.titleSmall,
-            color = MaterialTheme.colorScheme.primary,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 4.dp, bottom = 6.dp),
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // 分组标题 accent 竖条（主色）
+            Box(
+                Modifier
+                    .width(4.dp)
+                    .height(14.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+            Spacer(Modifier.width(7.dp))
+            Text(
+                title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 0.dp, bottom = 0.dp),
+            )
+        }
+        Spacer(Modifier.height(6.dp))
         Card(shape = RoundedCornerShape(18.dp), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
             Column(Modifier.padding(vertical = 4.dp)) { content() }
         }
@@ -945,14 +991,18 @@ private fun AboutTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlin
             SettingRow("GitHub 仓库与 Releases", subtitle = Updater.RELEASES_URL, onClick = {
                 runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Updater.RELEASES_URL))) }
             })
+            SettingRow("Android 原项目（本项目基于其修改）", subtitle = "github.com/OTFiles/dsh-pet-inAndroid", onClick = {
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/OTFiles/dsh-pet-inAndroid"))) }
+            })
             SettingRow("桌面端原项目", subtitle = "github.com/MerZlin/dsh-pet-indesktop", onClick = {
                 runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/MerZlin/dsh-pet-indesktop"))) }
             })
         }
         Section("说明") {
             Text(
-                "本应用为 dsh-pet 桌面桌宠的 Android 移植版：透明悬浮窗显示在任意应用之上；" +
-                        "素材在构建时由 WebM 重编码为旁路 alpha 视频，手机上无需任何额外组件。\n\n" +
+                "本应用由 FLT18355 基于 OTFiles/dsh-pet-inAndroid 仓库修改维护：\n" +
+                        "保留原作者（桌面端 MerZlin/dsh-pet-indesktop，Android 移植 OTFiles）署名与 MIT 许可。\n\n" +
+                        "功能：透明悬浮窗显示在任意应用之上；素材在构建时由 WebM 重编码为旁路 alpha 视频，手机上无需任何额外组件。\n\n" +
                         "许可：MIT（见桌面端仓库 LICENSE）。",
                 fontSize = 12.sp,
                 lineHeight = 18.sp,
