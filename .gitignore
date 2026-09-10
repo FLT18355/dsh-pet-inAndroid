@@ -68,3 +68,4 @@ android/app/src/main/assets/pet/
 
 # 缓存文件
 cache/*
+log.log

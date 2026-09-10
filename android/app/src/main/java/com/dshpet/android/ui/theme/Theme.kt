@@ -1,6 +1,5 @@
 package com.dshpet.android.ui.theme
 
-import android.graphics.Typeface
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -74,13 +73,12 @@ fun DshPetTheme(content: @Composable () -> Unit) {
         value = if (customFont.isBlank()) null
         else withContext(Dispatchers.IO) {
             runCatching {
-                val f = File(appCtx.filesDir, customFont)
-                FontFamily(Font(Typeface.createFromFile(f)))
+                FontFamily(Font(File(appCtx.filesDir, customFont)))
             }.getOrNull()
         }
     }
     val typography = remember(customFont, fontFamily) {
-        if (fontFamily == null) Typography() else Typography(defaultFontFamily = fontFamily)
+        fontFamily?.let { Typography().withFontFamily(it) } ?: Typography()
     }
 
     MaterialTheme(
@@ -89,3 +87,25 @@ fun DshPetTheme(content: @Composable () -> Unit) {
         content = content,
     )
 }
+
+/**
+ * 把全部 15 个文字样式替换为指定字体族。
+ * （material3 1.2.x 的 Typography 没有 defaultFontFamily 参数，只能逐样覆盖。）
+ */
+private fun Typography.withFontFamily(family: FontFamily): Typography = Typography(
+    displayLarge = displayLarge.copy(fontFamily = family),
+    displayMedium = displayMedium.copy(fontFamily = family),
+    displaySmall = displaySmall.copy(fontFamily = family),
+    headlineLarge = headlineLarge.copy(fontFamily = family),
+    headlineMedium = headlineMedium.copy(fontFamily = family),
+    headlineSmall = headlineSmall.copy(fontFamily = family),
+    titleLarge = titleLarge.copy(fontFamily = family),
+    titleMedium = titleMedium.copy(fontFamily = family),
+    titleSmall = titleSmall.copy(fontFamily = family),
+    bodyLarge = bodyLarge.copy(fontFamily = family),
+    bodyMedium = bodyMedium.copy(fontFamily = family),
+    bodySmall = bodySmall.copy(fontFamily = family),
+    labelLarge = labelLarge.copy(fontFamily = family),
+    labelMedium = labelMedium.copy(fontFamily = family),
+    labelSmall = labelSmall.copy(fontFamily = family),
+)
