@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -87,6 +88,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
+import java.io.File
 import com.dshpet.android.chat.SseClient
 import com.dshpet.android.data.PetConfig
 import com.dshpet.android.data.applyHideRecentsPolicy
@@ -293,6 +295,28 @@ private fun SwitchRow(
     checked: Boolean,
     onToggle: (Boolean) -> Unit,
 ) = SettingRow(title, subtitle, trailing = { Switch(checked, onToggle) })
+
+/**
+ * 把用户选中的字体文件复制到 filesDir（固定名 custom_font.ttf，覆盖旧文件）。
+ * 复制后用 Typeface 校验确实是可用字体；成功返回文件名，失败返回 null（已清理）。
+ */
+private fun copyFontToFiles(ctx: Context, uri: Uri): String? {
+    val out = File(ctx.filesDir, "custom_font.ttf")
+    return try {
+        val input = ctx.contentResolver.openInputStream(uri)
+        if (input == null) {
+            out.delete()
+            null
+        } else {
+            input.use { i -> out.outputStream().use { i.copyTo(it) } }
+            Typeface.createFromFile(out) // 非法字体文件会抛异常 → 走 catch
+            "custom_font.ttf"
+        }
+    } catch (e: Exception) {
+        out.delete()
+        null
+    }
+}
 
 // ================================================================ 常规
 @Composable
@@ -596,6 +620,21 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
     val selfTalk by cfg.flowBool("self_talk_enabled", false).collectAsState(initial = false)
     val stMin by cfg.flowInt("self_talk_min_interval", 20).collectAsState(initial = 20)
     val stMax by cfg.flowInt("self_talk_max_interval", 60).collectAsState(initial = 60)
+    // 自定义应用字体（TTF/OTF → filesDir/custom_font.ttf，全局应用）
+    val customFont by cfg.flowString("custom_font", "").collectAsState(initial = "")
+    var fontError by remember { mutableStateOf<String?>(null) }
+    val fontPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                fontError = withContext(Dispatchers.IO) {
+                    copyFontToFiles(ctx, uri)?.let { saved ->
+                        cfg.setCustomFontName(saved)
+                        null
+                    } ?: "字体文件无效，请选择有效的 TTF/OTF 字体"
+                }
+            }
+        }
+    }
 
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Section("大小与透明度") {
@@ -635,6 +674,34 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
                 listOf("left" to "朝左", "right" to "朝右").forEach { (v, label) ->
                     FilterChip(selected = facing == v, onClick = { scope.launch { cfg.setFacing(v) } }, label = { Text(label) })
                 }
+            }
+        }
+        Section("字体") {
+            SettingRow(
+                "应用字体",
+                if (customFont.isBlank()) "使用系统默认字体 · 点右侧选择 TTF 文件" else "已应用自定义字体：${customFont.substringAfterLast('/')}",
+                trailing = {
+                    TextButton(onClick = { fontPicker.launch("*/*") }) {
+                        Text(if (customFont.isBlank()) "选择 TTF" else "更换")
+                    }
+                },
+            )
+            fontError?.let {
+                Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            }
+            if (customFont.isNotBlank()) {
+                SettingRow(
+                    "恢复系统字体",
+                    "删除自定义字体，立即恢复默认（不影响已保存文件）",
+                    trailing = {
+                        TextButton(onClick = {
+                            scope.launch {
+                                runCatching { File(ctx.filesDir, customFont).delete() }
+                                cfg.setCustomFontName("")
+                            }
+                        }) { Text("恢复") }
+                    },
+                )
             }
         }
         Section("效果") {

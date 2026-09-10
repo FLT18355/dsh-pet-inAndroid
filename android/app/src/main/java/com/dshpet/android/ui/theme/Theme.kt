@@ -1,9 +1,22 @@
 package com.dshpet.android.ui.theme
 
+import android.graphics.Typeface
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import com.dshpet.android.data.PetConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Catppuccin Mocha 主题（暗色专用）。
@@ -44,11 +57,35 @@ private val DshPetMochaColors = darkColorScheme(
     scrim = Color(0xFF11111B),         // crust
 )
 
-/** 全局主题包装：所有 Compose 根（Activity / 悬浮窗）统一使用 Catppuccin Mocha。 */
+/**
+ * 全局主题包装：所有 Compose 根（Activity / 悬浮窗）统一使用 Catppuccin Mocha。
+ * 若用户在设置里上传了自定义 TTF/OTF 字体（存于 filesDir），则全局应用该字体；
+ * 字体文件在 IO 线程异步加载，不阻塞主线程。
+ */
 @Composable
 fun DshPetTheme(content: @Composable () -> Unit) {
+    val ctx = LocalContext.current
+    val appCtx = remember { ctx.applicationContext }
+    val customFont by remember(appCtx) { PetConfig.get(appCtx) }
+        .flowString("custom_font", "").collectAsState(initial = "")
+
+    // TTF 可能较大，IO 线程加载；加载完成前先渲染默认字体
+    val fontFamily by produceState<FontFamily?>(null, customFont) {
+        value = if (customFont.isBlank()) null
+        else withContext(Dispatchers.IO) {
+            runCatching {
+                val f = File(appCtx.filesDir, customFont)
+                FontFamily(Font(Typeface.createFromFile(f)))
+            }.getOrNull()
+        }
+    }
+    val typography = remember(customFont, fontFamily) {
+        if (fontFamily == null) Typography() else Typography(defaultFontFamily = fontFamily)
+    }
+
     MaterialTheme(
         colorScheme = DshPetMochaColors,
+        typography = typography,
         content = content,
     )
 }

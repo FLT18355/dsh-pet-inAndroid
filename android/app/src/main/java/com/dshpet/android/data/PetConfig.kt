@@ -87,6 +87,7 @@ class PetConfig(private val ctx: Context) {
         private val K_CLICK_SOUND = booleanPreferencesKey("click_sound_enabled")
         private val K_CLICK_SHOW_BALANCE = booleanPreferencesKey("click_show_balance")
         private val K_CLICK_SHOW_SELF_TALK = booleanPreferencesKey("click_show_self_talk")
+        private val K_CUSTOM_FONT = stringPreferencesKey("custom_font")          // 自定义字体文件名（filesDir 内，空=系统默认）
 
         // ---- 自言自语 ----
         private val K_SELF_TALK = booleanPreferencesKey("self_talk_enabled")
@@ -247,6 +248,8 @@ class PetConfig(private val ctx: Context) {
     suspend fun setClickSound(v: Boolean) = set("click_sound_enabled", v)
     suspend fun setClickShowBalance(v: Boolean) = set("click_show_balance", v)
     suspend fun setClickShowSelfTalk(v: Boolean) = set("click_show_self_talk", v)
+    suspend fun customFontName() = read(K_CUSTOM_FONT, "")
+    suspend fun setCustomFontName(v: String) = set("custom_font", v.take(120))
     suspend fun setSelfTalk(v: Boolean) = set("self_talk_enabled", v)
     suspend fun setSelfTalkMin(v: Int) = set("self_talk_min_interval", v)
     suspend fun setSelfTalkMax(v: Int) = set("self_talk_max_interval", v)
