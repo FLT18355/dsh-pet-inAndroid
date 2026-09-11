@@ -56,7 +56,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -160,7 +159,6 @@ class PetMenu(
     // ================================================================ UI
     @Composable
     private fun MenuRoot() {
-        val scope = rememberCoroutineScope()
         val cfg = PetConfig.get(ctx)
         // 菜单缩放（设置-外观可调 0.7x..1.4x，紧凑布局默认即小菜单）
         val menuScale by cfg.flowDouble("menu_scale", 1.0).collectAsState(initial = 1.0)
@@ -175,8 +173,11 @@ class PetMenu(
         var physics by remember { mutableStateOf(service.curPhysics) }
         val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
         val blurOn = blurCfg && Build.VERSION.SDK_INT >= 31
+        // 写入必须挂在服务级作用域：菜单 onDismiss 会立刻销毁窗口组合，
+        // rememberCoroutineScope 随之取消，DataStore 的 suspend 写入会被掐断
+        // （开关"时灵时不灵"的根因）。服务作用域随服务销毁才取消，写入必完成。
         fun run(action: suspend () -> Unit) {
-            scope.launch { action(); }
+            service.scope.launch { action() }
             onDismiss()
         }
 

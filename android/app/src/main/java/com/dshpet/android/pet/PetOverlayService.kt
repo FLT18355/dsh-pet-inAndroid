@@ -115,7 +115,7 @@ open class PetOverlayService : Service() {
         private val initFailed = mutableSetOf<Int>()
     }
 
-    private val scope = CoroutineScope(
+    internal val scope = CoroutineScope(
         SupervisorJob() + Dispatchers.Main.immediate +
                 kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
                     // 协程内异常不得让应用崩溃，写入内置日志
