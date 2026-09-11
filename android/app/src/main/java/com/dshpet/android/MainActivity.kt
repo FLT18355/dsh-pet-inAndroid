@@ -760,22 +760,42 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
             Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                 Text("台词内容（每行一条）", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val savedTexts by cfg.flowStringSet("self_talk_texts", emptySet()).collectAsState(initial = emptySet())
-                // 只在进入页面时同步一次；输入中不响应 DataStore 回写，避免光标跳动
+                // 仅在"有已保存内容且本地未同步"时载入一次；输入中不同步，避免打断编辑
                 var textsLocal by remember { mutableStateOf(savedTexts.joinToString("\n")) }
-                OutlinedTextField(
-                    value = textsLocal,
-                    onValueChange = { v ->
-                        textsLocal = v
+                var saveTip by remember { mutableStateOf(false) }
+                LaunchedEffect(savedTexts) {
+                    if (savedTexts.isNotEmpty() &&
+                        textsLocal.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet() != savedTexts
+                    ) {
+                        textsLocal = savedTexts.joinToString("\n")
+                    }
+                }
+                LaunchedEffect(saveTip) {
+                    if (saveTip) {
+                        kotlinx.coroutines.delay(2000)
+                        saveTip = false
+                    }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = textsLocal,
+                        onValueChange = { textsLocal = it },
+                        placeholder = { Text("好女孩……\n好模型……\n欧鲸鲸……", fontSize = 12.sp) },
+                        minLines = 3,
+                        maxLines = 8,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = {
                         scope.launch {
-                            cfg.setSelfTalkTexts(v.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet())
+                            cfg.setSelfTalkTexts(textsLocal.lines().map { it.trim() }.filter { it.isNotEmpty() }.toSet())
                         }
-                    },
-                    placeholder = { Text("好女孩……\n好模型……\n欧鲸鲸……", fontSize = 12.sp) },
-                    minLines = 3,
-                    maxLines = 8,
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                        saveTip = true
+                    }) {
+                        Text(if (saveTip) "已保存" else "保存")
+                    }
+                }
             }
             // 气泡样式：MD3 FilterChip 单选组 + 颜色预览
             Column(Modifier.padding(horizontal = 12.dp)) {
