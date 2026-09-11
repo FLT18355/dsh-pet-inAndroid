@@ -141,8 +141,6 @@ open class PetOverlayService : Service() {
     private var soundPool: SoundPool? = null
     private var clickSoundId = 0
     private var clickSoundId2 = 0
-    /** 点击音效交替播放（click.wav / click2.wav）的轮换标志 */
-    private var clickAlt = false
 
     // ---- 运行时设置快照（协程监听 DataStore 更新）----
     private var density = 1f
@@ -163,6 +161,9 @@ open class PetOverlayService : Service() {
     private var curSelfTalkMaxSec = 60
     private var selfTalkRunnable: Runnable? = null
     private var curClickSound = true
+    internal var curClickSoundChoice = "default"
+    internal var curEdgePeek = false
+    internal var curGoldenSpin = false
     private var curClickBalance = false
     private var curClickSelfTalk = false
     private var visible = true
@@ -285,6 +286,7 @@ open class PetOverlayService : Service() {
         easterEggs.clear()
         container?.let { runCatching { wm.removeView(it) } }
         runCatching { videoView.release() }
+        spinAnim?.cancel()
         soundPool?.release()
         CoroutineScope(Dispatchers.Main).launch {
             if (activeInstanceIds().isEmpty()) config.setPetRunning(false)
@@ -367,6 +369,12 @@ open class PetOverlayService : Service() {
         curCollision = config.collisionEnabled()
         // 音效音量（上游 v4.0.5：0-100%）
         curSoundVolume = config.soundVolume() / 100f
+        // 点击音效自选（default=内置 Q 弹 / duck=鸭子音效）
+        curClickSound = config.clickSound()
+        curClickSoundChoice = config.clickSoundChoice()
+        // 功能开关：边缘探头 / 黄金回旋
+        curEdgePeek = config.edgePeekEnabled()
+        curGoldenSpin = config.goldenSpinEnabled()
         // 点击台词绑定（上游 v4.1.0）
         curClickTalk = config.clickTalk()
         curThrowStrength = config.throwStrength()
@@ -386,6 +394,9 @@ open class PetOverlayService : Service() {
 
         // 设置监听（改动即时生效）
         observeSettings()
+
+        // 边缘探头：启动即吸附到屏幕边缘（只播待机动画）
+        if (curEdgePeek) applyEdgePeek(true)
 
         // 启动动画链
         engine.start()
@@ -672,6 +683,10 @@ open class PetOverlayService : Service() {
                     }
                     val threshold = (PetEngine.DRAG_THRESHOLD * curScale * density).coerceAtLeast(12.0)
                     if (!dragging && hypot(dx.toDouble(), dy.toDouble()) > threshold) {
+                        if (curEdgePeek) {
+                            // 边缘探头：禁止拖动（位置由吸附逻辑管理），点击仍有效
+                            return@setOnTouchListener true
+                        }
                         collisionMember?.infiniteMass = true
                         if (curShiftDrag && !longPressFired) {
                             // 仅长按可拖动：未长按的拖动被忽略，且取消按压状态
@@ -776,6 +791,8 @@ open class PetOverlayService : Service() {
         lastTapMs = now
         engine.onTap()
         squash()
+        // 黄金回旋（v2.0.0）：点击时旋转一圈
+        if (curGoldenSpin) goldenSpin()
         // 点击台词绑定（上游 v4.1.0：自定义台词+动画）
         val talk = curClickTalk
         if (talk.isNotBlank()) {
@@ -805,6 +822,103 @@ open class PetOverlayService : Service() {
         }
         squashAnim = anim
         anim.start()
+    }
+
+    // ================================================================ 黄金回旋
+    private var spinAnim: android.animation.ValueAnimator? = null
+
+    /** 黄金回旋（v2.0.0）：点击时桌宠绕中心旋转一圈 */
+    private fun goldenSpin() {
+        spinAnim?.cancel()
+        videoView.pivotX = videoView.width / 2f
+        videoView.pivotY = videoView.height / 2f
+        val anim = android.animation.ValueAnimator.ofFloat(0f, 360f).apply {
+            duration = 600
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener {
+                videoView.rotation = it.animatedValue as Float
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    videoView.rotation = 0f
+                }
+
+                override fun onAnimationCancel(animation: android.animation.Animator) {
+                    videoView.rotation = 0f
+                }
+            })
+        }
+        spinAnim = anim
+        anim.start()
+    }
+
+    // ================================================================ 边缘探头
+    /** 退出探头时恢复的位置（探头开启瞬间记录的吸附前位置） */
+    private var peekRestoreX = -1
+    private var peekRestoreY = -1
+    private var peekRestoreFacing = "left"
+
+    /**
+     * 边缘探头：桌宠吸附到屏幕边缘，像探头张望——窗口大部分移出屏幕，
+     * 只露出动画内容的一部分。开启期间引擎强制 idleOnly（只播待机动画），
+     * 防止移动/转向/动作动画导致位置或朝向错乱；关闭后恢复原位置。
+     */
+    private fun applyEdgePeek(on: Boolean) {
+        curEdgePeek = on
+        engine.idleOnly = on
+        engine.cancelMove()
+        // 探头期间锁死自动移动
+        engine.noMove = on || curNoMove
+        if (on) {
+            // 记录吸附前位置（供关闭时恢复）
+            peekRestoreX = engine.winX
+            peekRestoreY = engine.winY
+            peekRestoreFacing = engine.facing
+        }
+        // 吸附方向跟随当前朝向（facing=left → 贴左边缘探头，镜像校正后朝右看）
+        val (sw, sh) = screenPx()
+        val ww = engine.winW
+        val hh = engine.winH
+        if (on) {
+            val toLeft = engine.facing != "right"
+            val peekW = (ww * 0.30).toInt()          // 露出宽度：约窗口 30%
+            val x = if (toLeft) -(ww - peekW) else sw - peekW
+            // 垂直贴近底部，保留底部呼吸空间
+            val y = (sh - hh - (hh * 0.12).toInt()).coerceAtLeast(0)
+            moveWindowUnclamped(x, y)
+            // 探头方向：贴左边朝右看、贴右边朝左看（面对屏内）
+            engine.setFacing(if (toLeft) "right" else "left")
+            videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
+            persistFacing(if (toLeft) "right" else "left")
+            engine.switchToIdle()
+            savePosition()
+        } else {
+            // 恢复吸附前位置（重新 clamp 到正常窗口范围）
+            val xr = windowXRange(); val yr = windowYRange()
+            val rx = peekRestoreX.takeIf { it >= 0 }?.coerceIn(xr.first, xr.last)
+            val ry = peekRestoreY.takeIf { it >= 0 }?.coerceIn(yr.first, yr.last)
+            if (rx != null) moveWindowUnclamped(rx, ry)
+            // 恢复吸附前朝向与镜像
+            engine.setFacing(peekRestoreFacing)
+            videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
+            engine.noMove = curNoMove
+            engine.switchToIdle()
+            savePosition()
+        }
+    }
+
+    /** 不理会窗口 clamp 直接定位（探头状态允许窗口越出屏幕） */
+    private fun moveWindowUnclamped(xPx: Int, yPx: Int) {
+        val lp = params ?: return
+        val c = container ?: return
+        lp.x = xPx
+        lp.y = yPx
+        runCatching { wm.updateViewLayout(c, lp) }
+        collisionMember?.let {
+            it.x = xPx.toDouble(); it.y = yPx.toDouble()
+            it.w = engine.winW; it.h = engine.winH
+        }
+        engine.syncPosition(xPx, yPx)
     }
 
     // ================================================================ 移动窗口
@@ -935,6 +1049,15 @@ open class PetOverlayService : Service() {
         watch(c.flowDouble("animation_gap_seconds", 0.0)) { v -> curGap = v as Double; engine.animationGapSeconds = curGap }
         watch(c.flowInt("sound_volume", 100)) { v -> curSoundVolume = (v as Int).coerceIn(0, 100) / 100f }
         watch(c.flowBool("click_sound_enabled", true)) { v -> curClickSound = v as Boolean }
+        watch(c.flowString("click_sound_choice", "default")) { v ->
+            curClickSoundChoice = if (v == "duck") "duck" else "default"
+        }
+        watch(c.flowBool("edge_peek_enabled", false)) { v ->
+            val on = v as Boolean
+            if (on == curEdgePeek) return@watch
+            applyEdgePeek(on)
+        }
+        watch(c.flowBool("golden_spin_enabled", false)) { v -> curGoldenSpin = v as Boolean }
         watch(c.flowBool("click_show_balance", false)) { v -> curClickBalance = v as Boolean }
         watch(c.flowBool("click_show_self_talk", false)) { v -> curClickSelfTalk = v as Boolean }
         watch(c.flowBool("self_talk_enabled", false)) { v ->
@@ -1100,6 +1223,11 @@ open class PetOverlayService : Service() {
 
     /** 回到右下角（默认角落） */
     fun returnToCorner() {
+        if (curEdgePeek) {
+            // 先退出边缘探头（恢复原位置语义）
+            scope.launch { config.setEdgePeek(false) }
+            return
+        }
         engine.cancelMove()
         val (sw, sh) = screenPx()
         engine.setPosition(
@@ -1145,18 +1273,22 @@ open class PetOverlayService : Service() {
 
     internal var curSoundVolume = 1f
 
-    /** 点击音效：click.wav / click2.wav 交替播放（音色更丰富） */
-    private fun playClickSound() {
-        clickAlt = !clickAlt
-        val id = when {
-            clickAlt && clickSoundId2 != 0 -> clickSoundId2
-            clickSoundId != 0 -> clickSoundId
-            else -> 0
+    /**
+     * 点击音效（v2.0.0 自选）：
+     *  default → click.wav（内置 Q 弹）
+     *  duck    → click2.wav（鸭子音效）
+     * 不再交替播放。
+     */
+    private fun playClickSound(): Int {
+        val id = when (curClickSoundChoice) {
+            "duck" -> if (clickSoundId2 != 0) clickSoundId2 else clickSoundId
+            else -> if (clickSoundId != 0) clickSoundId else clickSoundId2
         }
         if (id != 0) {
             val v = curSoundVolume
             soundPool?.play(id, v, v, 1, 0, 1f)
         }
+        return id
     }
 
     // ================================================================ 通知

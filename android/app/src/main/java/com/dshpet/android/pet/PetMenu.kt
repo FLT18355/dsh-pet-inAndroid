@@ -18,13 +18,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -43,8 +40,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -62,7 +58,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,7 +67,6 @@ import com.dshpet.android.util.ProvideComposeHost
 import com.dshpet.android.util.attachComposeHost
 import com.dshpet.android.util.mdBlur
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * 长按桌宠弹出的 MD3 菜单（新版菜单布局，功能对齐桌面端 modern.json 分组）。
@@ -116,25 +110,32 @@ class PetMenu(
             } else false
         }
         runCatching { wm.addView(composeView, lp) }
+        view = composeView
+        params = lp
         // 菜单定位：桌宠上方（放不下放下方）
-        composeView.post {
-            val bw = composeView.measuredWidth
-            val bh = composeView.measuredHeight
-            val (sw, sh) = screenPx()
-            val petCx = engine.winX + engine.winW / 2
-            var x = petCx - bw / 2
-            x = x.coerceIn(8, maxOf(8, sw - bw - 8))
-            var y = engine.winY - bh - 12
-            if (y < 0) y = engine.winY + engine.winH + 12
-            y = y.coerceIn(0, maxOf(0, sh - bh))
-            lp.x = x; lp.y = y
-            runCatching { wm.updateViewLayout(composeView, lp) }
-        }
+        composeView.post { locate() }
+    }
+
+    fun locate() {
+        val v = view ?: return
+        val p = params ?: return
+        val bw = v.measuredWidth
+        val bh = v.measuredHeight
+        val (sw, sh) = screenPx()
+        val petCx = engine.winX + engine.winW / 2
+        var x = petCx - bw / 2
+        x = x.coerceIn(8, maxOf(8, sw - bw - 8))
+        var y = engine.winY - bh - 12
+        if (y < 0) y = engine.winY + engine.winH + 12
+        y = y.coerceIn(0, maxOf(0, sh - bh))
+        p.x = x; p.y = y
+        runCatching { wm.updateViewLayout(v, p) }
     }
 
     fun dismiss() {
         view?.let { runCatching { wm.removeView(it) } }
         view = null
+        params = null
     }
 
     /** 悬浮窗整体拖动（标题栏手势回调） */
@@ -167,6 +168,7 @@ class PetMenu(
         var sizeOpen by remember { mutableStateOf(false) }
         var animHubOpen by remember { mutableStateOf(false) }
         var quickOpen by remember { mutableStateOf(false) }
+        var funcOpen by remember { mutableStateOf(false) }
         var noMove by remember { mutableStateOf(engine.noMove) }
         var lock by remember { mutableStateOf(service.curLock) }
         var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
@@ -180,10 +182,25 @@ class PetMenu(
             service.scope.launch { action() }
             onDismiss()
         }
+        // 面板开关只写配置、不关菜单（方便连续切换）
+        fun runKeep(action: suspend () -> Unit) {
+            service.scope.launch { action() }
+        }
+
+        // 功能侧面板放哪边：桌宠在屏幕左半 → 面板放右侧；右半 → 放左侧
+        val (sw, _) = remember { screenPx() }
+        val petCx = engine.winX + engine.winW / 2
+        val panelOnRight = remember(funcOpen) { petCx < sw / 2 }
+
+        // 面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
+        androidx.compose.runtime.LaunchedEffect(funcOpen) {
+            androidx.compose.runtime.withFrameNanos { }
+            view?.post { locate() }
+        }
 
         Surface(
             modifier = Modifier
-                .width((236 * scaleF).dp)
+                .width(((if (funcOpen) 172 else 236) * scaleF).dp)
                 .graphicsLayer {
                     scaleX = scaleF; scaleY = scaleF
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
@@ -194,13 +211,137 @@ class PetMenu(
             shadowElevation = 10.dp,
             tonalElevation = 2.dp,
         ) {
+            Row {
+                if (funcOpen && !panelOnRight) FuncPanel(cfg, blurOn, scaleF, run, runKeep)
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                ) {
+                    // 标题栏：整条可拖动窗口，右侧直接关闭
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .pointerInput(Unit) {
+                                detectDragGestures { change, dragAmount ->
+                                    change.consume()
+                                    onWindowDrag(dragAmount.x, dragAmount.y)
+                                }
+                            }
+                            .padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.Filled.Menu, contentDescription = "拖动",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.width(18.dp),
+                        )
+                        Text(
+                            "小肥鱼",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = 6.dp),
+                        )
+                        IconButton(onClick = { dismiss() }, modifier = Modifier.height(28.dp)) {
+                            Icon(
+                                Icons.Filled.Close, contentDescription = "关闭",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(16.dp),
+                            )
+                        }
+                    }
+                    if (animHubOpen) {
+                        AnimHub(cfg, onBack = { animHubOpen = false }) { name -> run { engine.switch(name) } }
+                    } else if (quickOpen) {
+                        QuickLaunchList(cfg, onBack = { quickOpen = false }) { pkg ->
+                            run {
+                                val intent = ctx.packageManager.getLaunchIntentForPackage(pkg)
+                                if (intent != null) runCatching { ctx.startActivity(intent) }
+                            }
+                        }
+                    } else {
+                        // ---- 互动 ----
+                        MenuGroup("互动")
+                        MenuItem(Icons.Filled.Send, "AI 对话") { run { service.openChat() } }
+                        MenuItem(Icons.Filled.Star, "欧鲸鲸（彩蛋）") { run { EasterEggPopup.showRandom(ctx) } }
+                        // ---- 播放 ----
+                        MenuGroup("播放")
+                        MenuItem(Icons.Filled.PlayArrow, "动画集") { animHubOpen = true }
+                        MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") { speedOpen = true }
+                        SpeedSubmenu(speedOpen, cfg) { v -> run { cfg.setPlaybackSpeed(v) } }
+                        MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(engine.winW / 640.0)) { sizeOpen = true }
+                        SizeSubmenu(sizeOpen, cfg) { v -> run { cfg.setScale(v) } }
+                        // ---- 功能（侧面板）----
+                        MenuGroup("功能")
+                        MenuItem(
+                            Icons.Filled.Search,
+                            "边缘探头",
+                            badge = if (service.curEdgePeek) "开" else null,
+                        ) { funcOpen = true }
+                        MenuItem(
+                            Icons.Filled.Refresh,
+                            "黄金回旋",
+                            badge = if (service.curGoldenSpin) "开" else null,
+                        ) { funcOpen = true }
+                        MenuItem(
+                            Icons.Filled.Star,
+                            "更多功能",
+                            badge = "▸",
+                        ) { funcOpen = true }
+                        // ---- 工具 ----
+                        MenuGroup("工具")
+                        MenuItem(Icons.Filled.Star, "DeepSeek 余额") { run { service.showBalanceInBubble() } }
+                        MenuItem(Icons.Filled.Refresh, "检查更新") { run { service.checkUpdate() } }
+                        MenuItem(Icons.Filled.PlayArrow, "快捷启动") { quickOpen = true }
+                        // ---- 设置 ----
+                        MenuGroup("设置")
+                        MenuItem(Icons.Filled.Settings, "桌宠设置") { run { service.openSettings() } }
+                        HorizontalDivider(Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
+                        // ---- 退出 ----
+                        MenuItem(Icons.Filled.Close, "退出桌宠", danger = true) { run { service.quit() } }
+                    }
+                }
+                if (funcOpen && panelOnRight) FuncPanel(cfg, blurOn, scaleF, run, runKeep)
+            }
+        }
+    }
+
+    /** 功能侧面板：边缘探头 / 黄金回旋 / 点击音效自选 + 原功能分类项 */
+    @Composable
+    private fun FuncPanel(
+        cfg: PetConfig,
+        blurOn: Boolean,
+        scaleF: Float,
+        run: (suspend () -> Unit) -> Unit,
+        runKeep: (suspend () -> Unit) -> Unit,
+    ) {
+        var edgePeek by remember { mutableStateOf(service.curEdgePeek) }
+        var goldenSpin by remember { mutableStateOf(service.curGoldenSpin) }
+        var noMove by remember { mutableStateOf(engine.noMove) }
+        var lock by remember { mutableStateOf(service.curLock) }
+        var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
+        var physics by remember { mutableStateOf(service.curPhysics) }
+        var soundChoice by remember { mutableStateOf(service.curClickSoundChoice) }
+        Surface(
+            modifier = Modifier
+                .width((168 * scaleF).dp),
+            shape = RoundedCornerShape(16.dp),
+            color = if (blurOn) Color(0xE6FFFFFF) else MaterialTheme.colorScheme.surface,
+            shadowElevation = 6.dp,
+            tonalElevation = 1.dp,
+        ) {
             Column(
                 modifier = Modifier
                     .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                // 标题栏：整条可拖动窗口，右侧直接关闭
+                // 面板标题：随主菜单整体拖动关闭
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -210,16 +351,16 @@ class PetMenu(
                                 onWindowDrag(dragAmount.x, dragAmount.y)
                             }
                         }
-                        .padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                        .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
-                        Icons.Filled.Menu, contentDescription = "拖动",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.width(18.dp),
+                        Icons.Filled.Build, contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.width(16.dp),
                     )
                     Text(
-                        "小肥鱼",
+                        "功能",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -227,82 +368,73 @@ class PetMenu(
                             .weight(1f)
                             .padding(start = 6.dp),
                     )
-                    IconButton(onClick = { dismiss() }, modifier = Modifier.height(28.dp)) {
-                        Icon(
-                            Icons.Filled.Close, contentDescription = "关闭",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.width(16.dp),
-                        )
+                }
+                // ---- 新功能 ----
+                MenuGroup("新功能")
+                ToggleItem(Icons.Filled.Search, "边缘探头", edgePeek, sub = "贴边探头，只播待机") {
+                    edgePeek = !edgePeek
+                    runKeep { cfg.setEdgePeek(edgePeek) }
+                }
+                ToggleItem(Icons.Filled.Refresh, "黄金回旋", goldenSpin, sub = "点击旋转一圈") {
+                    goldenSpin = !goldenSpin
+                    runKeep { cfg.setGoldenSpin(goldenSpin) }
+                }
+                // ---- 点击音效自选 ----
+                MenuGroup("点击音效")
+                ChoiceItem("默认音效", soundChoice == "default") {
+                    soundChoice = "default"
+                    runKeep { cfg.setClickSoundChoice("default") }
+                }
+                ChoiceItem("鸭子音效", soundChoice == "duck") {
+                    soundChoice = "duck"
+                    runKeep { cfg.setClickSoundChoice("duck") }
+                }
+                // ---- 原功能分类项 ----
+                MenuGroup("功能")
+                ToggleItem(Icons.Filled.Build, "拖动物理", physics) {
+                    physics = !physics; run { cfg.setDragPhysics(physics) }
+                }
+                MenuItem(Icons.Filled.Home, "回到右下角") { run { service.returnToCorner() } }
+                ToggleItem(Icons.Filled.Close, "不移动", noMove) {
+                    noMove = !noMove; run { cfg.setNoMove(noMove) }
+                }
+                ToggleItem(Icons.Filled.Lock, "锁定位置", lock) {
+                    lock = !lock; run { cfg.setLockPosition(lock) }
+                }
+                ToggleItem(Icons.Filled.Close, "无法选中", mouseThrough) {
+                    mouseThrough = !mouseThrough
+                    // 无法选中 + 锁定会令桌宠完全失联（菜单也点不开），开启时自动解除锁定
+                    run {
+                        if (mouseThrough) cfg.setLockPosition(false)
+                        cfg.setMouseThrough(mouseThrough)
                     }
                 }
-                if (animHubOpen) {
-                    AnimHub(cfg, onBack = { animHubOpen = false }) { name -> run { engine.switch(name) } }
-                } else if (quickOpen) {
-                    QuickLaunchList(cfg, onBack = { quickOpen = false }) { pkg ->
-                        run {
-                            val intent = ctx.packageManager.getLaunchIntentForPackage(pkg)
-                            if (intent != null) runCatching { ctx.startActivity(intent) }
-                        }
-                    }
-                } else {
-                    // ---- 互动 ----
-                    MenuGroup("互动")
-                    MenuItem(Icons.Filled.Send, "AI 对话") { run { service.openChat() } }
-                    MenuItem(Icons.Filled.Star, "欧鲸鲸（彩蛋）") { run { EasterEggPopup.showRandom(ctx) } }
-                    // ---- 播放 ----
-                    MenuGroup("播放")
-                    MenuItem(Icons.Filled.PlayArrow, "动画集", badge = "91 段") { animHubOpen = true }
-                    MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") { speedOpen = true }
-                    SpeedSubmenu(speedOpen, cfg) { v -> run { cfg.setPlaybackSpeed(v) } }
-                    MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(engine.winW / 640.0)) { sizeOpen = true }
-                    SizeSubmenu(sizeOpen, cfg) { v -> run { cfg.setScale(v) } }
-                    // ---- 功能 ----
-                    MenuGroup("功能")
-                    ToggleItem(Icons.Filled.Build, "拖动物理", physics) {
-                        physics = !physics; run { cfg.setDragPhysics(physics) }
-                    }
-                    MenuItem(Icons.Filled.Home, "回到右下角") { run { service.returnToCorner() } }
-                    ToggleItem(Icons.Filled.Close, "不移动", noMove) {
-                        noMove = !noMove; run { cfg.setNoMove(noMove) }
-                    }
-                    ToggleItem(Icons.Filled.Lock, "锁定位置", lock) {
-                        lock = !lock; run { cfg.setLockPosition(lock) }
-                    }
-                    ToggleItem(Icons.Filled.Close, "无法选中", mouseThrough) {
-                        mouseThrough = !mouseThrough
-                        // 无法选中 + 锁定会令桌宠完全失联（菜单也点不开），开启时自动解除锁定
-                        run {
-                            if (mouseThrough) cfg.setLockPosition(false)
-                            cfg.setMouseThrough(mouseThrough)
-                        }
-                    }
-                    MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
-                    MenuItem(Icons.Filled.Star, "灵动岛") { run { service.toggleIsland() } }
-                    // ---- 工具 ----
-                    MenuGroup("工具")
-                    MenuItem(Icons.Filled.Star, "DeepSeek 余额") { run { service.showBalanceInBubble() } }
-                    MenuItem(Icons.Filled.Refresh, "检查更新") { run { service.checkUpdate() } }
-                    MenuItem(Icons.Filled.PlayArrow, "快捷启动") { quickOpen = true }
-                    // ---- 设置 ----
-                    MenuGroup("设置")
-                    MenuItem(Icons.Filled.Settings, "桌宠设置") { run { service.openSettings() } }
-                    HorizontalDivider(Modifier.padding(horizontal = 14.dp, vertical = 4.dp))
-                    // ---- 退出 ----
-                    MenuItem(Icons.Filled.Close, "退出桌宠", danger = true) { run { service.quit() } }
-                }
+                MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
+                MenuItem(Icons.Filled.Star, "灵动岛") { run { service.toggleIsland() } }
             }
         }
     }
 
     @Composable
     private fun MenuGroup(title: String) {
-        Text(
-            text = title,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(start = 16.dp, top = 6.dp, bottom = 1.dp),
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 14.dp, top = 6.dp, bottom = 1.dp),
+        ) {
+            Box(
+                Modifier
+                    .width(3.dp)
+                    .height(11.dp)
+                    .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp)),
+            )
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(start = 5.dp),
+            )
+        }
     }
 
     @Composable
@@ -328,6 +460,7 @@ class PetMenu(
             Text(
                 text = title,
                 fontSize = 13.sp,
+                maxLines = 1,
                 color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
                     .padding(start = 12.dp)
@@ -340,7 +473,13 @@ class PetMenu(
     }
 
     @Composable
-    private fun ToggleItem(icon: ImageVector, title: String, checked: Boolean, onToggle: () -> Unit) {
+    private fun ToggleItem(
+        icon: ImageVector,
+        title: String,
+        checked: Boolean,
+        sub: String? = null,
+        onToggle: () -> Unit,
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -349,8 +488,36 @@ class PetMenu(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(18.dp))
-            Text(title, fontSize = 13.sp, modifier = Modifier.padding(start = 12.dp).weight(1f))
+            if (sub == null) {
+                Text(title, fontSize = 13.sp, maxLines = 1, modifier = Modifier.padding(start = 12.dp).weight(1f))
+            } else {
+                Column(Modifier.padding(start = 12.dp).weight(1f)) {
+                    Text(title, fontSize = 13.sp, maxLines = 1)
+                    Text(sub, fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                }
+            }
             Switch(checked = checked, onCheckedChange = { onToggle() }, modifier = Modifier.height(24.dp))
+        }
+    }
+
+    /** 单选行（音效选择等）：选中项带对勾 */
+    @Composable
+    private fun ChoiceItem(title: String, selected: Boolean, onPick: () -> Unit) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onPick)
+                .padding(start = 26.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title, fontSize = 13.sp, maxLines = 1,
+                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            if (selected) {
+                Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.width(16.dp))
+            }
         }
     }
 

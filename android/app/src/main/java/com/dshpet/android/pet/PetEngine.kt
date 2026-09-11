@@ -33,6 +33,8 @@ class PetEngine(
 
     /** 是否禁用自动移动（"不移动"） */
     var noMove = false
+    /** 边缘探头模式：只允许播放待机动画，其它动画一律不走（防止移出边缘/换向出问题） */
+    var idleOnly = false
     var animationGapSeconds = 0.0
     var playbackSpeed = 1.0
 
@@ -112,12 +114,22 @@ class PetEngine(
     }
 
     fun switch(name: String) {
+        if (idleOnly && name !in idles) {
+            // 边缘探头：其它动画一律拦截，只允许待机
+            idles.firstOrNull()?.let { anim = it; play(it) }
+            return
+        }
         anim = name
         play(name)
     }
 
     /** 动画播放完毕（由视图回调） */
     fun onAnimEnded(name: String) {
+        if (idleOnly) {
+            // 边缘探头：播完待机继续播待机（随机不重复当前）
+            idles.pick(exclude = name).also { switch(it) }
+            return
+        }
         val drag = dragName
         if (drag != null && name == drag && dragging) {
             switch(drag) // 拖拽中：悬空反馈循环
@@ -150,6 +162,11 @@ class PetEngine(
     // ============================== 动画链 ==============================
 
     private fun pickNext() {
+        if (idleOnly) {
+            // 边缘探头：只走待机链
+            if (idles.isNotEmpty()) switch(idles.pick(exclude = anim))
+            return
+        }
         if (acts.isEmpty()) {
             idles.firstOrNull()?.let { if (it != anim) switch(it) }
             return
@@ -199,6 +216,7 @@ class PetEngine(
 
     /** 朝 facing 方向计划一次移动；屏幕空间不足返回 false */
     fun tryMove(name: String? = null): Boolean {
+        if (idleOnly || noMove) return false
         if (movePlan != null) return true
         if (moves.isEmpty()) return false
         val dirSign = if (facing == "right") 1 else -1
@@ -267,12 +285,14 @@ class PetEngine(
 
     /** 点击：随机点击回应动画 + Q 弹（由服务触发音效/挤压） */
     fun onTap() {
+        if (idleOnly) return
         if (clicks.isEmpty()) return
         cancelMove()
         switch(clicks.pick())
     }
 
     fun onDragStart() {
+        if (idleOnly) return
         dragging = true
         cancelMove()
         gapActive = false

@@ -456,6 +456,9 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
     val moveMinPx by cfg.flowInt("move_min_px", 60).collectAsState(initial = 60)
     val moveMaxPx by cfg.flowInt("move_max_px", 240).collectAsState(initial = 240)
     val clickSound by cfg.flowBool("click_sound_enabled", true).collectAsState(initial = true)
+    val clickSoundChoice by cfg.flowString("click_sound_choice", "default").collectAsState(initial = "default")
+    val edgePeek by cfg.flowBool("edge_peek_enabled", false).collectAsState(initial = false)
+    val goldenSpin by cfg.flowBool("golden_spin_enabled", false).collectAsState(initial = false)
     val clickBalance by cfg.flowBool("click_show_balance", false).collectAsState(initial = false)
     val clickSelfTalk by cfg.flowBool("click_show_self_talk", false).collectAsState(initial = false)
 
@@ -573,8 +576,33 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
                 Text("${gap}s", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
         }
+        Section("功能") {
+            SwitchRow(
+                "边缘探头",
+                if (edgePeek) "已吸附到屏幕边缘探头张望，仅播放待机动画" else "贴到屏幕边缘探头张望（仅播放待机动画）",
+                edgePeek,
+            ) { on -> scope.launch { cfg.setEdgePeek(on) } }
+            SwitchRow(
+                "黄金回旋",
+                if (goldenSpin) "点击桌宠时会旋转一圈" else "点击桌宠时将其旋转一圈",
+                goldenSpin,
+            ) { on -> scope.launch { cfg.setGoldenSpin(on) } }
+        }
         Section("点击互动") {
             SwitchRow("点击音效", "点击桌宠时的 Q 弹音效", clickSound) { on -> scope.launch { cfg.setClickSound(on) } }
+            // 音效自选（v2.0.0）：默认音效 / 鸭子音效
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) {
+                Text("音效选择", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("default" to "默认音效", "duck" to "鸭子音效").forEach { (id, label) ->
+                        FilterChip(
+                            selected = clickSoundChoice == id,
+                            onClick = { scope.launch { cfg.setClickSoundChoice(id) } },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+            }
             // 音量（上游 v4.0.5）
             val soundVolume by cfg.flowInt("sound_volume", 100).collectAsState(initial = 100)
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {

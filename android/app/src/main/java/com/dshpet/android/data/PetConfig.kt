@@ -85,6 +85,9 @@ class PetConfig(private val ctx: Context) {
         private val K_MODEL_LIST = stringSetPreferencesKey("model_list")         // 已同步模型列表
         private val K_ANIM_GAP_SEC = doublePreferencesKey("animation_gap_seconds")
         private val K_CLICK_SOUND = booleanPreferencesKey("click_sound_enabled")
+        private val K_CLICK_SOUND_CHOICE = stringPreferencesKey("click_sound_choice") // default/duck 音效自选
+        private val K_EDGE_PEEK = booleanPreferencesKey("edge_peek_enabled")           // 边缘探头
+        private val K_GOLDEN_SPIN = booleanPreferencesKey("golden_spin_enabled")       // 黄金回旋
         private val K_CLICK_SHOW_BALANCE = booleanPreferencesKey("click_show_balance")
         private val K_CLICK_SHOW_SELF_TALK = booleanPreferencesKey("click_show_self_talk")
         private val K_CUSTOM_FONT = stringPreferencesKey("custom_font")          // 自定义字体文件名（filesDir 内，空=系统默认）
@@ -145,6 +148,9 @@ class PetConfig(private val ctx: Context) {
     suspend fun playbackSpeed() = read(K_PLAYBACK_SPEED, DEFAULT_PLAYBACK_SPEED).coerceIn(0.5, 3.0)
     suspend fun animGapSeconds() = read(K_ANIM_GAP_SEC, 0.0).coerceIn(0.0, 3600.0)
     suspend fun clickSound() = read(K_CLICK_SOUND, true)
+    suspend fun clickSoundChoice() = read(K_CLICK_SOUND_CHOICE, "default")
+    suspend fun edgePeekEnabled() = read(K_EDGE_PEEK, false)
+    suspend fun goldenSpinEnabled() = read(K_GOLDEN_SPIN, false)
     suspend fun clickShowBalance() = read(K_CLICK_SHOW_BALANCE, false)
     suspend fun clickShowSelfTalk() = read(K_CLICK_SHOW_SELF_TALK, false)
 
@@ -246,6 +252,9 @@ class PetConfig(private val ctx: Context) {
     suspend fun setModelList(list: List<String>) = set("model_list", list.toSet())
     suspend fun setAnimGap(v: Double) = set("animation_gap_seconds", v)
     suspend fun setClickSound(v: Boolean) = set("click_sound_enabled", v)
+    suspend fun setClickSoundChoice(v: String) = set("click_sound_choice", v)
+    suspend fun setEdgePeek(v: Boolean) = set("edge_peek_enabled", v)
+    suspend fun setGoldenSpin(v: Boolean) = set("golden_spin_enabled", v)
     suspend fun setClickShowBalance(v: Boolean) = set("click_show_balance", v)
     suspend fun setClickShowSelfTalk(v: Boolean) = set("click_show_self_talk", v)
     suspend fun customFontName() = read(K_CUSTOM_FONT, "")
