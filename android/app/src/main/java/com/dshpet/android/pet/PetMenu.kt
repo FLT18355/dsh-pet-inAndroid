@@ -178,12 +178,12 @@ class PetMenu(
         // 写入必须挂在服务级作用域：菜单 onDismiss 会立刻销毁窗口组合，
         // rememberCoroutineScope 随之取消，DataStore 的 suspend 写入会被掐断
         // （开关"时灵时不灵"的根因）。服务作用域随服务销毁才取消，写入必完成。
-        fun run(action: suspend () -> Unit) {
+        val run: (suspend () -> Unit) -> Unit = { action ->
             service.scope.launch { action() }
             onDismiss()
         }
         // 面板开关只写配置、不关菜单（方便连续切换）
-        fun runKeep(action: suspend () -> Unit) {
+        val runKeep: (suspend () -> Unit) -> Unit = { action ->
             service.scope.launch { action() }
         }
 

@@ -897,7 +897,7 @@ open class PetOverlayService : Service() {
             val xr = windowXRange(); val yr = windowYRange()
             val rx = peekRestoreX.takeIf { it >= 0 }?.coerceIn(xr.first, xr.last)
             val ry = peekRestoreY.takeIf { it >= 0 }?.coerceIn(yr.first, yr.last)
-            if (rx != null) moveWindowUnclamped(rx, ry)
+            if (rx != null && ry != null) moveWindowUnclamped(rx, ry)
             // 恢复吸附前朝向与镜像
             engine.setFacing(peekRestoreFacing)
             videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
