@@ -98,7 +98,9 @@ class PetChatWindow(private val ctx: Context) {
             w, h,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             // 可聚焦：不设 FLAG_NOT_FOCUSABLE，软键盘可用
-            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            // 但窗口外触摸要能穿给下层应用（否则悬浮聊天开着时整屏失效）
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -284,7 +286,7 @@ class PetChatWindow(private val ctx: Context) {
                         )
                     }
                 }
-                items(messages, key = { it.ts to it.content.length }) { m ->
+                items(messages) { m ->
                     MessageBubble(m, streaming && m === messages.lastOrNull())
                 }
             }

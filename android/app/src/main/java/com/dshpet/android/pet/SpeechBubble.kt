@@ -61,11 +61,22 @@ class SpeechBubble(
     private var view: View? = null
     private var params: WindowManager.LayoutParams? = null
     private var hideRunnable: Runnable? = null
-    /** 由服务侧更新的配置缓存（服务在协程里读取 DataStore 后写入） */
-    @Volatile
-    var bubbleStyle: String = "classic_top"
-    @Volatile
-    var blurOn: Boolean = false
+    /**
+     * 由服务侧更新的配置缓存（服务在协程里读取 DataStore 后写入）。
+     * 用 Compose 状态承载：内容/样式变化直接触发重组，
+     * 不需要（也不能）对同一个 ComposeView 二次调用 setContent。
+     */
+    private val textState = mutableStateOf("")
+    private val styleState = mutableStateOf("classic_top")
+    private val blurState = mutableStateOf(false)
+
+    var bubbleStyle: String
+        get() = styleState.value
+        set(v) { styleState.value = v }
+
+    var blurOn: Boolean
+        get() = blurState.value
+        set(v) { blurState.value = v }
 
     fun showText(text: String, durationMs: Long = 6000) {
         hideRunnable?.let { handler.removeCallbacks(it) }
@@ -76,9 +87,9 @@ class SpeechBubble(
                     ProvideComposeHost {
                     DshPetTheme {
                     BubbleContent(
-                        text = text,
-                        style = bubbleStyle,
-                        blur = blurOn,
+                        text = textState.value,
+                        style = styleState.value,
+                        blur = blurState.value,
                     )
                     }
                     }
@@ -98,19 +109,8 @@ class SpeechBubble(
             view = composeView
             params = lp
             runCatching { wm.addView(composeView, lp) }
-        } else {
-            (view as ComposeView).setContent {
-                ProvideComposeHost {
-                DshPetTheme {
-                    BubbleContent(
-                        text = text,
-                        style = bubbleStyle,
-                        blur = blurOn,
-                    )
-                }
-                }
-            }
         }
+        textState.value = text
         view?.visibility = View.VISIBLE
         // 等布局完成后再定位（首次 measure 前尺寸为 0）
         view?.post { reposition() }

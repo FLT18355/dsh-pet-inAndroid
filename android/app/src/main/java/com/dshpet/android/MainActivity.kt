@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -297,6 +298,29 @@ private fun SwitchRow(
 ) = SettingRow(title, subtitle, trailing = { Switch(checked, onToggle) })
 
 /**
+ * 设置页滑块：拖动过程只改本地状态，松手才写入 DataStore。
+ * 直接 onValueChange 里写 DataStore 会每帧触发一次磁盘写入 + Flow 回读，
+ * 滑块跟手变差、且产生大量无谓 IO。
+ */
+@Composable
+private fun RowScope.CommitSlider(
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    steps: Int = 0,
+    onCommit: (Float) -> Unit,
+) {
+    var local by remember(value) { mutableFloatStateOf(value) }
+    Slider(
+        value = local,
+        onValueChange = { local = it },
+        onValueChangeFinished = { onCommit(local) },
+        valueRange = valueRange,
+        steps = steps,
+        modifier = Modifier.weight(1f),
+    )
+}
+
+/**
  * 把用户选中的字体文件复制到 filesDir（固定名 custom_font.ttf，覆盖旧文件）。
  * 复制后用 Typeface 校验确实是可用字体；成功返回文件名，失败返回 null（已清理）。
  */
@@ -331,6 +355,20 @@ private fun GeneralTab(ctx: android.content.Context, cfg: PetConfig, scope: kotl
         val granted = Settings.canDrawOverlays(ctx)
         scope.launch { cfg.setOverlayPermission(granted) }
         if (granted) PetOverlayService.ensureRunning(ctx)
+    }
+
+    // 通知权限（Android 13+）：前台服务常驻通知（桌宠控制入口）没有它就不显示
+    var notifGranted by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < 33 ||
+                ctx.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        notifGranted = ok
+    }
+    LaunchedEffect(Unit) {
+        if (!notifGranted) notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
 
     LaunchedEffect(overlayGranted) {
@@ -375,6 +413,26 @@ private fun GeneralTab(ctx: android.content.Context, cfg: PetConfig, scope: kotl
             )
         }
         Section("后台行为") {
+            if (Build.VERSION.SDK_INT >= 33) {
+                SettingRow(
+                    "通知权限",
+                    if (notifGranted) "已授予：通知栏显示桌宠控制入口" else "未授予：通知栏不显示桌宠控制入口",
+                    trailing = {
+                        TextButton(onClick = {
+                            if (notifGranted) {
+                                runCatching {
+                                    ctx.startActivity(
+                                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                            .putExtra(Settings.EXTRA_APP_PACKAGE, PACKAGE)
+                                    )
+                                }
+                            } else {
+                                notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                        }) { Text(if (notifGranted) "通知设置" else "去授权") }
+                    },
+                )
+            }
             SwitchRow("开机自启", "重启手机后自动显示桌宠", autoStart) { on ->
                 scope.launch { cfg.setAutoStart(on) }
                 val pm = ctx.packageManager
@@ -497,29 +555,17 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("移动概率", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = moveProb.toFloat(), onValueChange = { scope.launch { cfg.setMoveProbability(it.toDouble()) } },
-                    valueRange = 0f..0.9f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(moveProb.toFloat(), 0f..0.9f) { scope.launch { cfg.setMoveProbability(it.toDouble()) } }
                 Text("${(moveProb * 100).roundToInt()}%", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("散步距离", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = moveMinPx.toFloat(), onValueChange = { scope.launch { cfg.setMoveRange(it.toInt(), maxOf(it.toInt(), moveMaxPx)) } },
-                    valueRange = 10f..600f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(moveMinPx.toFloat(), 10f..600f) { scope.launch { cfg.setMoveRange(it.toInt(), maxOf(it.toInt(), moveMaxPx)) } }
                 Text("${moveMinPx}px", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("最大距离", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = moveMaxPx.toFloat(), onValueChange = { scope.launch { cfg.setMoveRange(minOf(moveMinPx, it.toInt()), it.toInt()) } },
-                    valueRange = 30f..1200f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(moveMaxPx.toFloat(), 30f..1200f) { scope.launch { cfg.setMoveRange(minOf(moveMinPx, it.toInt()), it.toInt()) } }
                 Text("${moveMaxPx}px", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             SwitchRow("锁定位置", "桌宠固定不动，点击互动仍有效", lock) { on -> scope.launch { cfg.setLockPosition(on) } }
@@ -559,20 +605,12 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("播放速度", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = speed.toFloat(), onValueChange = { scope.launch { cfg.setPlaybackSpeed(it.toDouble()) } },
-                    valueRange = 0.5f..2.0f, steps = 5,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(speed.toFloat(), 0.5f..2.0f, steps = 5) { scope.launch { cfg.setPlaybackSpeed(it.toDouble()) } }
                 Text("${speed}×", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("动画间隔", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = gap.toFloat(), onValueChange = { scope.launch { cfg.setAnimGap(it.toDouble()) } },
-                    valueRange = 0f..10f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(gap.toFloat(), 0f..10f) { scope.launch { cfg.setAnimGap(it.toDouble()) } }
                 Text("${gap}s", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
         }
@@ -607,11 +645,7 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
             val soundVolume by cfg.flowInt("sound_volume", 100).collectAsState(initial = 100)
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("音效音量", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = soundVolume.toFloat(), onValueChange = { scope.launch { cfg.setSoundVolume(it.toInt()) } },
-                    valueRange = 0f..100f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(soundVolume.toFloat(), 0f..100f) { scope.launch { cfg.setSoundVolume(it.toInt()) } }
                 Text("$soundVolume%", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             // 点击台词绑定（上游 v4.1.0）
@@ -647,7 +681,6 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
     val islandText by cfg.flowString("island_text", "").collectAsState(initial = "")
     val selfTalk by cfg.flowBool("self_talk_enabled", false).collectAsState(initial = false)
     val stMin by cfg.flowInt("self_talk_min_interval", 20).collectAsState(initial = 20)
-    val stMax by cfg.flowInt("self_talk_max_interval", 60).collectAsState(initial = 60)
     // 自定义应用字体（TTF/OTF → filesDir/custom_font.ttf，全局应用）
     val customFont by cfg.flowString("custom_font", "").collectAsState(initial = "")
     var fontError by remember { mutableStateOf<String?>(null) }
@@ -668,34 +701,17 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
         Section("大小与透明度") {
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("宠物大小", Modifier.width(90.dp), fontSize = 13.sp)
-                var scaleLocal by remember { mutableFloatStateOf(scale.toFloat()) }
-                LaunchedEffect(scale) { scaleLocal = scale.toFloat() }
-                Slider(
-                    value = scaleLocal,
-                    onValueChange = { scaleLocal = it },
-                    onValueChangeFinished = { scope.launch { cfg.setScale(scaleLocal.toDouble()) } },
-                    valueRange = 0.25f..2.0f,
-                    steps = 6,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(scale.toFloat(), 0.25f..2.0f, steps = 6) { scope.launch { cfg.setScale(it.toDouble()) } }
                 Text("${"%.2f".format(scale)}×", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("菜单大小", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = menuScale.toFloat(), onValueChange = { scope.launch { cfg.setMenuScale(it.toDouble()) } },
-                    valueRange = 0.7f..1.4f, steps = 6,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(menuScale.toFloat(), 0.7f..1.4f, steps = 6) { scope.launch { cfg.setMenuScale(it.toDouble()) } }
                 Text("${"%.1f".format(menuScale)}×", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("不透明度", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = opacity.toFloat(), onValueChange = { scope.launch { cfg.setPetOpacity(it.toInt()) } },
-                    valueRange = 10f..100f,
-                    modifier = Modifier.weight(1f),
-                )
+                CommitSlider(opacity.toFloat(), 10f..100f) { scope.launch { cfg.setPetOpacity(it.toInt()) } }
                 Text("$opacity%", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -776,12 +792,8 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
         Section("自言自语气泡") {
             SwitchRow("允许自言自语", "随机间隔冒出可爱小气泡", selfTalk) { on -> scope.launch { cfg.setSelfTalk(on) } }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("间隔", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(
-                    value = stMin.toFloat(), onValueChange = { scope.launch { cfg.setSelfTalkMin(it.toInt()) } },
-                    valueRange = 5f..300f,
-                    modifier = Modifier.weight(1f),
-                )
+                Text("最短间隔", Modifier.width(90.dp), fontSize = 13.sp)
+                CommitSlider(stMin.toFloat(), 5f..300f) { scope.launch { cfg.setSelfTalkMin(it.toInt()) } }
                 Text("${stMin}s", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             // 台词内容：每行一条，随机轮播（留空显示占位提示）
@@ -990,12 +1002,12 @@ private fun AiTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlinx.c
             OutlinedTextField(apiKey, { scope.launch { cfg.setChatApiKey(it) } }, label = { Text("API Key") }, singleLine = true, modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("温度", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(value = temperature.toFloat(), onValueChange = { scope.launch { cfg.setChatTemperature(it.toDouble()) } }, valueRange = 0f..2f, modifier = Modifier.weight(1f))
+                CommitSlider(temperature.toFloat(), 0f..2f) { scope.launch { cfg.setChatTemperature(it.toDouble()) } }
                 Text("$temperature", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("最大 Tokens", Modifier.width(90.dp), fontSize = 13.sp)
-                Slider(value = maxTokens.toFloat(), onValueChange = { scope.launch { cfg.setChatMaxTokens(it.toInt()) } }, valueRange = 256f..8192f, steps = 30, modifier = Modifier.weight(1f))
+                CommitSlider(maxTokens.toFloat(), 256f..8192f, steps = 30) { scope.launch { cfg.setChatMaxTokens(it.toInt()) } }
                 Text("$maxTokens", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
             }
             SwitchRow("跳过 SSL 证书验证", "本地网关/自签名证书时开启", !verifySsl) { on ->
@@ -1116,9 +1128,6 @@ private fun AboutTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlin
                             if (Updater.isNewer(rel.tag, BuildConfig.VERSION_NAME)) "发现新版本 ${rel.tag}！点击右侧打开下载页"
                             else "已经是最新版本"
                         }, { "检查失败：${it.message}" })
-                        r.getOrNull()?.let { _ ->
-                            // 打开下载页
-                        }
                     }
                 }) { Text("检查") }
             }, onClick = { updateInfo?.let { if (it.contains("下载页")) runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Updater.RELEASES_URL))) } } })

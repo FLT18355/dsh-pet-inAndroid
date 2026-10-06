@@ -35,6 +35,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private var streamJob: Job? = null
 
+    /** 流式代次：停止/重新发送后，旧流的迟到回调一律丢弃 */
+    private var streamToken = 0
+
     init {
         refresh()
         viewModelScope.launch { ensureSession() }
@@ -90,6 +93,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         val session = _current.value ?: return
         val trimmed = text.trim()
         if (trimmed.isEmpty() || _busy.value) return
+        if (!_busy.compareAndSet(expect = false, update = true)) return
+        _streaming.value = true
+        _streamText.value = ""
+        val token = ++streamToken
         viewModelScope.launch {
             if (session.messages.none { it.role == "user" }) {
                 repo.rename(session.id, repo.deriveTitle(trimmed))
@@ -98,10 +105,6 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             session.messages.add(userMsg)
             repo.save(session)
             refresh()
-
-            _busy.value = true
-            _streaming.value = true
-            _streamText.value = ""
 
             val cfg = SseClient.ChatCfg(
                 baseUrl = config.chatBaseUrl(),
@@ -114,28 +117,38 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 verifySsl = config.chatVerifySsl(),
             )
             val history = session.messages.takeLast(20).map { SseClient.Msg(it.role, it.content) }
+            // 结束（正常 onDone / 出错 onError）都必须复位 streaming/busy，
+            // 否则一次失败后界面永久停在"思考中…"且无法再发送。
+            var finished = false
+            fun finish() {
+                if (finished || token != streamToken) return
+                finished = true
+                val full = _streamText.value
+                if (full.isNotBlank()) session.messages.add(ChatRepo.Message("assistant", full))
+                repoSave(session)
+                _streamText.value = ""
+                _streaming.value = false
+                _busy.value = false
+            }
             streamJob = SseClient.stream(
                 cfg = cfg,
                 messages = history,
-                onDelta = { _streamText.value += it },
+                onDelta = { if (token == streamToken) _streamText.value += it },
                 onError = { err ->
-                    _streamText.value = if (_streamText.value.isBlank()) "（错误）$err" else _streamText.value + "\n\n（错误）$err"
-                },
-                onDone = {
-                    val full = _streamText.value
-                    if (full.isNotBlank()) {
-                        session.messages.add(ChatRepo.Message("assistant", full))
+                    if (token == streamToken) {
+                        _streamText.value =
+                            if (_streamText.value.isBlank()) "（错误）$err"
+                            else _streamText.value + "\n\n（错误）$err"
                     }
-                    repoSave(session)
-                    _streamText.value = ""
-                    _streaming.value = false
-                    _busy.value = false
+                    finish()
                 },
+                onDone = { finish() },
             )
         }
     }
 
     fun stopStream() {
+        streamToken++
         streamJob?.cancel()
         streamJob = null
         _streaming.value = false

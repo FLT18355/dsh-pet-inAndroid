@@ -165,10 +165,10 @@ class DynamicIsland(private val ctx: Context) {
     }
 
     private fun togglePet() {
-        // 单击 → 桌宠主实例显示/隐藏切换
-        val intent = android.content.Intent(ctx, PetOverlayService::class.java)
-            .setAction(if (PetOverlayService.petHidden) "show" else "hide")
-        runCatching { ctx.startService(intent) }
+        // 同进程内直接调用服务方法：后台 startService 在 Android 8+ 会被系统
+        // 拦截（IllegalStateException 被 runCatching 吞掉 → 单击静默无效）。
+        val svc = ctx as? PetOverlayService ?: return
+        svc.togglePetHidden()
     }
 
     private fun screenPx(): Pair<Int, Int> {

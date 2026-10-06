@@ -65,8 +65,11 @@ private val DshPetMochaColors = darkColorScheme(
 fun DshPetTheme(content: @Composable () -> Unit) {
     val ctx = LocalContext.current
     val appCtx = remember { ctx.applicationContext }
-    val customFont by remember(appCtx) { PetConfig.get(appCtx) }
-        .flowString("custom_font", "").collectAsState(initial = "")
+    // Flow 必须随 PetConfig 一起 remember：内联构造会让每次重组都重建 Flow
+    // 并重启收集（Compose 根包裹全应用，重组频率高）。
+    val cfg = remember(appCtx) { PetConfig.get(appCtx) }
+    val fontFlow = remember(cfg) { cfg.flowString("custom_font", "") }
+    val customFont by fontFlow.collectAsState(initial = "")
 
     // TTF 可能较大，IO 线程加载；加载完成前先渲染默认字体
     val fontFamily by produceState<FontFamily?>(null, customFont) {

@@ -100,6 +100,10 @@ object SseClient {
                     if (parser.done) break
                 }
                 withContext(Dispatchers.Main) { onDone() }
+                runCatching { resp.close() }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 用户点了"停止"/窗口关闭：正常取消，不当作错误上报
+                throw e
             } catch (e: Exception) {
                 val msg = when (e) {
                     is javax.net.ssl.SSLException, is java.security.cert.CertificateException ->

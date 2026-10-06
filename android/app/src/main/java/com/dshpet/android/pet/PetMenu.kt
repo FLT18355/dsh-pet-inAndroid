@@ -91,7 +91,8 @@ class PetMenu(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+            WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -99,6 +100,7 @@ class PetMenu(
         }
         view = composeView
         params = lp
+        composeView.isFocusableInTouchMode = true
         composeView.setOnKeyListener { _, keyCode, _ ->
             if (keyCode == KeyEvent.KEYCODE_BACK) {
                 dismiss(); true
@@ -110,10 +112,8 @@ class PetMenu(
             } else false
         }
         runCatching { wm.addView(composeView, lp) }
-        view = composeView
-        params = lp
         // 菜单定位：桌宠上方（放不下放下方）
-        composeView.post { locate() }
+        composeView.post { composeView.requestFocus(); locate() }
     }
 
     fun locate() {
@@ -163,16 +163,14 @@ class PetMenu(
         val cfg = PetConfig.get(ctx)
         // 菜单缩放（设置-外观可调 0.7x..1.4x，紧凑布局默认即小菜单）
         val menuScale by cfg.flowDouble("menu_scale", 1.0).collectAsState(initial = 1.0)
+        // 宠物大小（与设置页同一数据源；engine.winW 是物理像素，不能直接换算 dp 档位）
+        val menuPetScale by cfg.flowDouble("scale", 0.72).collectAsState(initial = 0.72)
         val scaleF = menuScale.toFloat()
         var speedOpen by remember { mutableStateOf(false) }
         var sizeOpen by remember { mutableStateOf(false) }
         var animHubOpen by remember { mutableStateOf(false) }
         var quickOpen by remember { mutableStateOf(false) }
         var funcOpen by remember { mutableStateOf(false) }
-        var noMove by remember { mutableStateOf(engine.noMove) }
-        var lock by remember { mutableStateOf(service.curLock) }
-        var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
-        var physics by remember { mutableStateOf(service.curPhysics) }
         val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
         val blurOn = blurCfg && Build.VERSION.SDK_INT >= 31
         // 写入必须挂在服务级作用域：菜单 onDismiss 会立刻销毁窗口组合，
@@ -187,12 +185,7 @@ class PetMenu(
             service.scope.launch { action() }
         }
 
-        // 功能侧面板放哪边：桌宠在屏幕左半 → 面板放右侧；右半 → 放左侧
-        val (sw, _) = remember { screenPx() }
-        val petCx = engine.winX + engine.winW / 2
-        val panelOnRight = remember(funcOpen) { petCx < sw / 2 }
-
-        // 面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
+        // 功能面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
         androidx.compose.runtime.LaunchedEffect(funcOpen) {
             androidx.compose.runtime.withFrameNanos { }
             view?.post { locate() }
@@ -200,7 +193,7 @@ class PetMenu(
 
         Surface(
             modifier = Modifier
-                .width(((if (funcOpen) 172 else 236) * scaleF).dp)
+                .width((236 * scaleF).dp)
                 .graphicsLayer {
                     scaleX = scaleF; scaleY = scaleF
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
@@ -211,15 +204,13 @@ class PetMenu(
             shadowElevation = 10.dp,
             tonalElevation = 2.dp,
         ) {
-            Row {
-                if (funcOpen && !panelOnRight) FuncPanel(cfg, blurOn, scaleF, run, runKeep)
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(1.dp),
-                ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
                     // 标题栏：整条可拖动窗口，右侧直接关闭
                     Row(
                         modifier = Modifier
@@ -255,8 +246,10 @@ class PetMenu(
                             )
                         }
                     }
-                    if (animHubOpen) {
-                        AnimHub(cfg, onBack = { animHubOpen = false }) { name -> run { engine.switch(name) } }
+                    if (funcOpen) {
+                        FuncPanel(cfg, blurOn, onBack = { funcOpen = false }, run, runKeep)
+                    } else if (animHubOpen) {
+                        AnimHub(onBack = { animHubOpen = false }) { name -> run { engine.switch(name) } }
                     } else if (quickOpen) {
                         QuickLaunchList(cfg, onBack = { quickOpen = false }) { pkg ->
                             run {
@@ -268,15 +261,15 @@ class PetMenu(
                         // ---- 互动 ----
                         MenuGroup("互动")
                         MenuItem(Icons.Filled.Send, "AI 对话") { run { service.openChat() } }
-                        MenuItem(Icons.Filled.Star, "欧鲸鲸（彩蛋）") { run { EasterEggPopup.showRandom(ctx) } }
+                        MenuItem(Icons.Filled.Star, "欧鲸鲸（彩蛋）") { run { service.spawnEasterEgg() } }
                         // ---- 播放 ----
                         MenuGroup("播放")
                         MenuItem(Icons.Filled.PlayArrow, "动画集") { animHubOpen = true }
-                        MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") { speedOpen = true }
-                        SpeedSubmenu(speedOpen, cfg) { v -> run { cfg.setPlaybackSpeed(v) } }
-                        MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(engine.winW / 640.0)) { sizeOpen = true }
-                        SizeSubmenu(sizeOpen, cfg) { v -> run { cfg.setScale(v) } }
-                        // ---- 功能（侧面板）----
+                        MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") { speedOpen = !speedOpen; sizeOpen = false }
+                        SpeedSubmenu(speedOpen) { v -> run { cfg.setPlaybackSpeed(v) } }
+                        MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(menuPetScale)) { sizeOpen = !sizeOpen; speedOpen = false }
+                        SizeSubmenu(sizeOpen, menuPetScale) { v -> run { cfg.setScale(v) } }
+                        // ---- 功能（展开功能页）----
                         MenuGroup("功能")
                         MenuItem(
                             Icons.Filled.Search,
@@ -305,18 +298,16 @@ class PetMenu(
                         // ---- 退出 ----
                         MenuItem(Icons.Filled.Close, "退出桌宠", danger = true) { run { service.quit() } }
                     }
-                }
-                if (funcOpen && panelOnRight) FuncPanel(cfg, blurOn, scaleF, run, runKeep)
             }
         }
     }
 
-    /** 功能侧面板：边缘探头 / 黄金回旋 / 点击音效自选 + 原功能分类项 */
+    /** 功能面板：边缘探头 / 黄金回旋 / 点击音效自选 + 原功能分类项 */
     @Composable
     private fun FuncPanel(
         cfg: PetConfig,
         blurOn: Boolean,
-        scaleF: Float,
+        onBack: () -> Unit,
         run: (suspend () -> Unit) -> Unit,
         runKeep: (suspend () -> Unit) -> Unit,
     ) {
@@ -329,7 +320,7 @@ class PetMenu(
         var soundChoice by remember { mutableStateOf(service.curClickSoundChoice) }
         Surface(
             modifier = Modifier
-                .width((168 * scaleF).dp),
+                .fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
             color = if (blurOn) Color(0xE6FFFFFF) else MaterialTheme.colorScheme.surface,
             shadowElevation = 6.dp,
@@ -337,11 +328,11 @@ class PetMenu(
         ) {
             Column(
                 modifier = Modifier
-                    .verticalScroll(rememberScrollState())
+                    .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                // 面板标题：随主菜单整体拖动关闭
+                // 面板标题：返回主菜单（随主菜单整体拖动）
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -351,14 +342,11 @@ class PetMenu(
                                 onWindowDrag(dragAmount.x, dragAmount.y)
                             }
                         }
-                        .padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                        .clickable(onClick = onBack)
+                        .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        Icons.Filled.Build, contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.width(16.dp),
-                    )
+                    Text("◀ 返回", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
                     Text(
                         "功能",
                         fontSize = 13.sp,
@@ -366,9 +354,10 @@ class PetMenu(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
                             .weight(1f)
-                            .padding(start = 6.dp),
+                            .padding(start = 10.dp),
                     )
                 }
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
                 // ---- 新功能 ----
                 MenuGroup("新功能")
                 ToggleItem(Icons.Filled.Search, "边缘探头", edgePeek, sub = "贴边探头，只播待机") {
@@ -522,7 +511,7 @@ class PetMenu(
     }
 
     @Composable
-    private fun SpeedSubmenu(open: Boolean, cfg: PetConfig, onPick: (Double) -> Unit) {
+    private fun SpeedSubmenu(open: Boolean, onPick: (Double) -> Unit) {
         if (!open) return
         listOf(1.0, 1.25, 1.5, 1.75, 2.0).forEach { v ->
             Row(
@@ -540,7 +529,7 @@ class PetMenu(
     }
 
     @Composable
-    private fun SizeSubmenu(open: Boolean, cfg: PetConfig, onPick: (Double) -> Unit) {
+    private fun SizeSubmenu(open: Boolean, currentScale: Double, onPick: (Double) -> Unit) {
         if (!open) return
         listOf(0.5, 0.72, 0.85, 1.0).forEach { v ->
             Row(
@@ -550,7 +539,7 @@ class PetMenu(
                     .padding(start = 36.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
             ) {
                 Text(sizeLabel(v), fontSize = 12.sp)
-                if (engine.winW == (640.0 * v).toInt()) {
+                if (kotlin.math.abs(currentScale - v) < 0.001) {
                     Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.width(16.dp))
                 }
             }
@@ -558,7 +547,7 @@ class PetMenu(
     }
 
     @Composable
-    private fun AnimHub(cfg: PetConfig, onBack: () -> Unit, onPick: (String) -> Unit) {
+    private fun AnimHub(onBack: () -> Unit, onPick: (String) -> Unit) {
         val all = engine.idles + engine.turns + engine.moves + engine.clicks + engine.acts
         Column(Modifier.padding(vertical = 4.dp)) {
             Row(

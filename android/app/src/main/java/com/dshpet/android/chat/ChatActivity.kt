@@ -189,7 +189,7 @@ private fun ChatScreen(vm: ChatViewModel, blur: Boolean) {
                                 )
                             }
                         }
-                        items(messages, key = { it.ts to it.content.length }) { m ->
+                        items(messages) { m ->
                             MessageBubble(m, streaming && m === messages.lastOrNull())
                         }
                     }

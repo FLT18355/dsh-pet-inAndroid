@@ -197,6 +197,9 @@ open class PetOverlayService : Service() {
     // 永不重启，导致物理拖动/后续自动走动的 tick 从未被调用。
     private val moveTicker = object : Runnable {
         override fun run() {
+            // 动画间隔到点必须解除 gap 状态：否则一次动作/移动后
+            // 引擎会永远停在待机/转向链（tickGap 原先无人调用）。
+            engine.tickGap()
             if (engine.movePlanActive() || physMode != null) {
                 engine.tickMove()
                 tickPhysics()
@@ -223,6 +226,10 @@ open class PetOverlayService : Service() {
                     "重启=${intent == null}(null intent=系统重建) container=${container != null}"
         )
         synchronized(activeInstances) { activeInstances.add(instanceId) }
+        // 先转前台再处理任何分支：startForegroundService 启动后若未在 5s 内
+        // 调用 startForeground（例如权限被撤销直接 stopSelf），系统会抛
+        // RemoteServiceException 让应用崩溃。
+        startForeground(1000 + instanceId, buildNotification())
         when (intent?.action) {
             "quit" -> { quit(); return START_NOT_STICKY }
             "hide" -> { setHidden(true); return START_NOT_STICKY }
@@ -234,7 +241,6 @@ open class PetOverlayService : Service() {
             return START_NOT_STICKY
         }
         scope.launch { config.setPetRunning(true) }
-        startForeground(1000 + instanceId, buildNotification())
         if (synchronized(initFailed) { initFailed.contains(instanceId) }) {
             // 上次初始化失败：不再重试，避免重启循环
             stopSelf()
@@ -269,10 +275,12 @@ open class PetOverlayService : Service() {
             "onDestroy instance=$instanceId（用户退出/服务被杀/初始化失败均会到这）"
         )
         synchronized(activeInstances) { activeInstances.remove(instanceId) }
+        // 必须在 scope.cancel() 之前：savePosition 内部走 scope.launch
+        // （engine 未初始化时不能碰，否则会记一条无意义异常）
+        if (this::engine.isInitialized) savePosition()
         scope.cancel()
         uiHandler.removeCallbacksAndMessages(null)
         settingsJobs.forEach { it.cancel() }
-        savePosition()
         removeMenu()
         bubble?.dismiss()
         stopIsland()
@@ -280,6 +288,7 @@ open class PetOverlayService : Service() {
         collisionMember?.let { CollisionHub.unregister(it.id) }
         collisionMember = null
         CollisionHub.setOnMoved(instanceId, null)
+        if (instanceId == 0) CollisionHub.onImpact = null
         stopAgentBus()
         dismissChat()
         easterEggs.forEach { it.dismiss() }
@@ -440,6 +449,10 @@ open class PetOverlayService : Service() {
                 }
             }
         }
+        // 碰撞音效（全局单槽：只由主实例注册，避免多开时重复播放）
+        if (instanceId == 0) {
+            CollisionHub.onImpact = { playCollisionSound() }
+        }
         scheduleSelfTalk()
         applyOpacity()
         AppLog.log(
@@ -466,12 +479,19 @@ open class PetOverlayService : Service() {
     private fun setHidden(hidden: Boolean) {
         if (instanceId != 0) return
         petHidden = hidden
+        visible = !hidden
         val c = container
         if (c != null) {
             uiHandler.post { c.visibility = if (hidden) View.GONE else View.VISIBLE }
             if (hidden) videoView.pausePlay() else videoView.resumePlay()
             AppLog.log("SVC", "桌宠 ${if (hidden) "隐藏" else "显示"}")
         }
+    }
+
+    /** 灵动岛单击：桌宠显示/隐藏切换（同进程直调，见 DynamicIsland.togglePet） */
+    fun togglePetHidden() {
+        if (instanceId != 0) return
+        setHidden(!petHidden)
     }
 
     fun toggleIsland() {
@@ -645,11 +665,8 @@ open class PetOverlayService : Service() {
                     physVel = doubleArrayOf(0.0, 0.0)
                     physMode = null
                     engine.cancelMove()
-                    if (curLock) {
-                        // 锁定位置：不响应拖动，点击仍有效
-                        return@setOnTouchListener true
-                    }
-                    // 长按菜单（默认 500ms；"仅长按可拖动"时同样先长按）
+                    // 长按菜单（默认 500ms；"仅长按可拖动"时同样先长按）。
+                    // 锁定位置时也必须保留长按：否则菜单打不开，用户无法再解锁。
                     uiHandler.removeCallbacks(longPressRunnable)
                     uiHandler.postDelayed(longPressRunnable, if (curShiftDrag) 300 else 500)
                     true
@@ -687,6 +704,10 @@ open class PetOverlayService : Service() {
                             // 边缘探头：禁止拖动（位置由吸附逻辑管理），点击仍有效
                             return@setOnTouchListener true
                         }
+                        if (curLock) {
+                            // 锁定位置：忽略拖动（保留长按菜单，不设无限质量）
+                            return@setOnTouchListener true
+                        }
                         collisionMember?.infiniteMass = true
                         if (curShiftDrag && !longPressFired) {
                             // 仅长按可拖动：未长按的拖动被忽略，且取消按压状态
@@ -695,7 +716,6 @@ open class PetOverlayService : Service() {
                             return@setOnTouchListener true
                         }
                         uiHandler.removeCallbacks(longPressRunnable)
-                        if (curLock) return@setOnTouchListener true
                         dragging = true
                         engine.onDragStart()
                     }
@@ -719,11 +739,12 @@ open class PetOverlayService : Service() {
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     uiHandler.removeCallbacks(longPressRunnable)
+                    // 拖拽结束必须无条件复位（锁定/取消路径也会置位）
+                    collisionMember?.infiniteMass = false
                     if (dragging) {
                         justDragged = true
                         uiHandler.postDelayed({ justDragged = false }, 150)
                         engine.onDragEnd()
-                        collisionMember?.infiniteMass = false
                         // 弹弓发射：按蓄力拉伸发射
                         if (slingshotAiming) {
                             slingshotAiming = false
@@ -743,6 +764,8 @@ open class PetOverlayService : Service() {
                                 physPos = doubleArrayOf(engine.winX.toDouble(), engine.winY.toDouble())
                                 physMode = "throw"
                             }
+                            dragging = false
+                            pressActive = false
                             return@setOnTouchListener true
                         }
                         if (curPhysics) {
@@ -760,6 +783,9 @@ open class PetOverlayService : Service() {
                         }
                     } else if (!longPressFired && !justDragged) {
                         onTap()
+                    } else if (longPressFired && curShiftDrag && !justDragged) {
+                        // 仅长按可拖动：长按后未拖动直接松手 → 弹出菜单（否则无入口）
+                        openMenu()
                     }
                     dragging = false
                     pressActive = false
@@ -962,14 +988,6 @@ open class PetOverlayService : Service() {
             val m = collisionMember
             if (m != null) {
                 m.vx = physVel[0]; m.vy = physVel[1]
-                // 碰撞结算改变了成员速度 → 采纳
-                val r0 = PetEngine.throwStep(
-                    physPos[0], physPos[1], physVel[0], physVel[1], dt,
-                    left, top, right, bottom,
-                )
-                physPos = doubleArrayOf(r0.px, r0.py)
-                physVel = doubleArrayOf(r0.vx, r0.vy)
-                m.vx = physVel[0]; m.vy = physVel[1]
             }
             val r = PetEngine.throwStep(
                 physPos[0], physPos[1], physVel[0], physVel[1], dt,
@@ -977,6 +995,9 @@ open class PetOverlayService : Service() {
             )
             physPos = doubleArrayOf(r.px, r.py)
             physVel = doubleArrayOf(r.vx, r.vy)
+            if (m != null) {
+                m.vx = physVel[0]; m.vy = physVel[1]
+            }
             moveWindow(physPos[0].roundToInt(), physPos[1].roundToInt())
             val speed = hypot(r.vx, r.vy)
             if (PetEngine.isAtRest(r.py, r.vx, r.vy, bottom, r.bounced, speed)) {
@@ -1152,6 +1173,13 @@ open class PetOverlayService : Service() {
         MainActivity.start(this)
     }
 
+    /** 欧鲸鲸彩蛋：由服务统一持有，退出时统一清理（并限制同时存在数量） */
+    fun spawnEasterEgg() {
+        val popup = EasterEggPopup.showRandom(this) ?: return
+        easterEggs.add(popup)
+        while (easterEggs.size > 8) easterEggs.removeAt(0).dismiss()
+    }
+
     // 悬浮 AI 对话窗口（长按菜单入口）
     private var chatWindow: PetChatWindow? = null
 
@@ -1223,17 +1251,18 @@ open class PetOverlayService : Service() {
 
     /** 回到右下角（默认角落） */
     fun returnToCorner() {
+        val (sw, sh) = screenPx()
+        val cornerX = (sw - engine.winW - 24).coerceAtLeast(0)
+        val cornerY = (sh - engine.winH - 24).coerceAtLeast(0)
         if (curEdgePeek) {
-            // 先退出边缘探头（恢复原位置语义）
+            // 先退出边缘探头：把"恢复位置"改成目标角落，退出时会落到这里
+            peekRestoreX = cornerX
+            peekRestoreY = cornerY
             scope.launch { config.setEdgePeek(false) }
             return
         }
         engine.cancelMove()
-        val (sw, sh) = screenPx()
-        engine.setPosition(
-            (sw - engine.winW - 24).coerceAtLeast(0),
-            (sh - engine.winH - 24).coerceAtLeast(0),
-        )
+        engine.setPosition(cornerX, cornerY)
         savePosition()
     }
 

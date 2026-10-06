@@ -44,7 +44,8 @@ class PetApp : Application() {
             MainActivity.applyRecentsAlias(this@PetApp, cfg.hideFromRecents())
             setBootReceiverEnabled(cfg.autoStart())
             if (cfg.autoStart() && cfg.overlayPermissionGranted()) {
-                PetOverlayService.ensureRunning(this@PetApp, persist = false)
+                // 进程可能由 BOOT_COMPLETED/后台拉起：必须走 startForegroundService
+                PetOverlayService.ensureRunning(this@PetApp, persist = true)
             }
         }
     }

@@ -88,17 +88,18 @@ class EasterEggPopup private constructor(
             }
         }
 
-        fun showRandom(ctx: Context) {
+        fun showRandom(ctx: Context): EasterEggPopup? {
             // 彩蛋是装饰功能：任何异常都只记日志，绝不带崩进程
-            try {
+            return try {
                 val imgs = availableImages(ctx)
                 if (imgs.isEmpty()) {
                     com.dshpet.android.util.AppLog.log("EASTER", "彩蛋图片池为空，跳过")
-                    return
+                    return null
                 }
-                EasterEggPopup(ctx, imgs[Random.nextInt(imgs.size)]).show()
+                EasterEggPopup(ctx, imgs[Random.nextInt(imgs.size)]).also { it.show() }
             } catch (e: Throwable) {
                 com.dshpet.android.util.AppLog.log("EASTER", "彩蛋弹窗失败: ${e.message}")
+                null
             }
         }
     }

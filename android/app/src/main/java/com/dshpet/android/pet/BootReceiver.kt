@@ -19,7 +19,9 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             val cfg = PetConfig.get(context.applicationContext)
             if (cfg.autoStart() && Settings.canDrawOverlays(context.applicationContext)) {
-                PetOverlayService.ensureRunning(context.applicationContext, persist = false)
+                // 后台（BOOT_COMPLETED 豁免）必须用 startForegroundService：
+                // startService 在 Android 8+ 后台会直接抛 IllegalStateException
+                PetOverlayService.ensureRunning(context.applicationContext, persist = true)
             }
         }
     }
