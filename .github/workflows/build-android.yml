@@ -3,7 +3,8 @@ name: build-android
 # 在 GitHub Actions 上构建 Android APK（本机环境不编译 Android）：
 #   - 构建机装 ffmpeg 做一次性素材预处理（WebM → 旁路 alpha h264，体积反而更小）；
 #   - Gradle 编译 Kotlin/Compose → 签名 Release APK；
-#   - 产物上传为 Artifact；推送 v* 标签时同时创建 GitHub Release。
+#   - 产物上传为 Artifact；推送 android-* 标签 / workflow_dispatch 指定 tag 时创建 GitHub Release，
+#     可用 workflow_dispatch 的 release_notes 自定义本次更新说明（写入 Release 正文）。
 # 手机上不包含 ffmpeg 等任何额外组件。
 
 on:
@@ -16,6 +17,11 @@ on:
         description: '打 Release 的标签（留空只出 Artifact）'
         required: false
         default: ''
+      release_notes:
+        description: '本次更新说明（写入 Release 正文，支持多行 Markdown；留空用默认说明）'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -90,25 +96,47 @@ jobs:
             echo "tag=" >> "$GITHUB_OUTPUT"
           fi
 
+      # 自定义更新说明：workflow_dispatch 的 release_notes 若有内容则放在正文最前
+      - name: Compose release notes
+        id: notes
+        if: steps.version.outputs.tag != ''
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          CUSTOM_NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          {
+            echo "## dsh-pet 桌宠 · Android 版 ${RELEASE_TAG}"
+            echo
+            if [ -n "$CUSTOM_NOTES" ]; then
+              echo "### 本次更新说明"
+              echo
+              echo "$CUSTOM_NOTES"
+              echo
+              echo "---"
+              echo
+            fi
+            cat <<'EOF'
+          - 透明悬浮窗桌宠，显示在任意应用之上（悬浮窗权限）
+          - 91 段动画完整移植（WebM → 旁路 alpha，手机上零额外组件）
+          - MD3 界面，可开关毛玻璃效果（默认关）
+          - 设置中可开启"隐藏后台"（android:excludeFromRecents）
+          - 多开、AI 对话、自言自语、彩蛋、余额查询、快捷启动
+          - 边缘探头：把桌宠拖到屏幕左/右边缘即贴边探头张望，只播待机动画（仅播放待机动画）
+          - 音乐播放：长按菜单显示当前曲目，左右切换/上一首下一首，可自传音乐；播放时宠物播放「悠闲哼歌」
+          - 点击音效自选：默认 Q 弹 / 鸭子音效
+          - 宠物菜单美化 + 「功能」页（左上角可返回）
+          - 最低 Android 9（API 28）
+
+          安装：下载 APK 侧载安装（需允许"未知来源"），首次启动授予悬浮窗权限。
+          EOF
+          } > release-notes.md
+          echo "written:" && wc -l release-notes.md
+
       - name: Create GitHub Release (tag pushes / dispatch with tag)
         if: steps.version.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: dsh-pet Android ${{ steps.version.outputs.tag }}
-          body: |
-            ## dsh-pet 桌宠 · Android 版 ${{ steps.version.outputs.tag }}
-
-            - 透明悬浮窗桌宠，显示在任意应用之上（悬浮窗权限）
-            - 91 段动画完整移植（WebM → 旁路 alpha，手机上零额外组件）
-            - MD3 界面，可开关毛玻璃效果（默认关）
-            - 设置中可开启"隐藏后台"（android:excludeFromRecents）
-            - 多开、AI 对话、自言自语、彩蛋、余额查询、快捷启动
-            - 边缘探头：贴屏幕边缘探头张望，只播待机动画（v2.0.0）
-            - 黄金回旋：点击桌宠旋转一圈（v2.0.0）
-            - 点击音效自选：默认 Q 弹 / 鸭子音效（v2.0.0）
-            - 宠物菜单美化 + 「功能」页（左上角可返回）
-            - 最低 Android 9（API 28）
-
-            安装：下载 APK 侧载安装（需允许"未知来源"），首次启动授予悬浮窗权限。
+          body_path: release-notes.md
           files: android/app/build/outputs/apk/release/*.apk

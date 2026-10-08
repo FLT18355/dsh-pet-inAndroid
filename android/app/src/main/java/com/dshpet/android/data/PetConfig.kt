@@ -87,9 +87,11 @@ class PetConfig(private val ctx: Context) {
         private val K_CLICK_SOUND = booleanPreferencesKey("click_sound_enabled")
         private val K_CLICK_SOUND_CHOICE = stringPreferencesKey("click_sound_choice") // default/duck 音效自选
         private val K_EDGE_PEEK = booleanPreferencesKey("edge_peek_enabled")           // 边缘探头
-        private val K_GOLDEN_SPIN = booleanPreferencesKey("golden_spin_enabled")       // 黄金回旋
         private val K_CLICK_SHOW_BALANCE = booleanPreferencesKey("click_show_balance")
         private val K_CLICK_SHOW_SELF_TALK = booleanPreferencesKey("click_show_self_talk")
+        // ---- 音乐播放 ----
+        private val K_MUSIC_INDEX = intPreferencesKey("music_index")          // 当前曲目下标（0 基）
+        private val K_MUSIC_VOLUME = intPreferencesKey("music_volume")        // 音乐音量 0-100
         private val K_CUSTOM_FONT = stringPreferencesKey("custom_font")          // 自定义字体文件名（filesDir 内，空=系统默认）
 
         // ---- 自言自语 ----
@@ -150,9 +152,10 @@ class PetConfig(private val ctx: Context) {
     suspend fun clickSound() = read(K_CLICK_SOUND, true)
     suspend fun clickSoundChoice() = read(K_CLICK_SOUND_CHOICE, "default")
     suspend fun edgePeekEnabled() = read(K_EDGE_PEEK, false)
-    suspend fun goldenSpinEnabled() = read(K_GOLDEN_SPIN, false)
     suspend fun clickShowBalance() = read(K_CLICK_SHOW_BALANCE, false)
     suspend fun clickShowSelfTalk() = read(K_CLICK_SHOW_SELF_TALK, false)
+    suspend fun musicIndex() = read(K_MUSIC_INDEX, 0).coerceAtLeast(0)
+    suspend fun musicVolume() = read(K_MUSIC_VOLUME, 80).coerceIn(0, 100)
 
     suspend fun selfTalkEnabled() = read(K_SELF_TALK, false)
     suspend fun selfTalkMin() = read(K_SELF_TALK_MIN, 20)
@@ -254,9 +257,10 @@ class PetConfig(private val ctx: Context) {
     suspend fun setClickSound(v: Boolean) = set("click_sound_enabled", v)
     suspend fun setClickSoundChoice(v: String) = set("click_sound_choice", v)
     suspend fun setEdgePeek(v: Boolean) = set("edge_peek_enabled", v)
-    suspend fun setGoldenSpin(v: Boolean) = set("golden_spin_enabled", v)
     suspend fun setClickShowBalance(v: Boolean) = set("click_show_balance", v)
     suspend fun setClickShowSelfTalk(v: Boolean) = set("click_show_self_talk", v)
+    suspend fun setMusicIndex(v: Int) = set("music_index", v.coerceAtLeast(0))
+    suspend fun setMusicVolume(v: Int) = set("music_volume", v.coerceIn(0, 100))
     suspend fun customFontName() = read(K_CUSTOM_FONT, "")
     suspend fun setCustomFontName(v: String) = set("custom_font", v.take(120))
     suspend fun setSelfTalk(v: Boolean) = set("self_talk_enabled", v)

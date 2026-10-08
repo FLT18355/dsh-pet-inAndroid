@@ -72,6 +72,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -342,6 +343,16 @@ private fun copyFontToFiles(ctx: Context, uri: Uri): String? {
     }
 }
 
+/**
+ * 查询 SAF 选中文件的显示名（上传音乐时用于落盘文件名）。
+ */
+private fun queryDisplayName(ctx: Context, uri: Uri): String? = runCatching {
+    ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+        val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+    }
+}.getOrNull()
+
 // ================================================================ 常规
 @Composable
 private fun GeneralTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlinx.coroutines.CoroutineScope) {
@@ -516,7 +527,6 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
     val clickSound by cfg.flowBool("click_sound_enabled", true).collectAsState(initial = true)
     val clickSoundChoice by cfg.flowString("click_sound_choice", "default").collectAsState(initial = "default")
     val edgePeek by cfg.flowBool("edge_peek_enabled", false).collectAsState(initial = false)
-    val goldenSpin by cfg.flowBool("golden_spin_enabled", false).collectAsState(initial = false)
     val clickBalance by cfg.flowBool("click_show_balance", false).collectAsState(initial = false)
     val clickSelfTalk by cfg.flowBool("click_show_self_talk", false).collectAsState(initial = false)
 
@@ -617,14 +627,9 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
         Section("功能") {
             SwitchRow(
                 "边缘探头",
-                if (edgePeek) "已吸附到屏幕边缘探头张望，仅播放待机动画" else "贴到屏幕边缘探头张望（仅播放待机动画）",
+                if (edgePeek) "开启中：把桌宠拖到屏幕左/右边缘就会贴边探头（仅播放待机动画）" else "开启后，把桌宠拖到屏幕左/右边缘即贴边探头张望（仅播放待机动画）",
                 edgePeek,
             ) { on -> scope.launch { cfg.setEdgePeek(on) } }
-            SwitchRow(
-                "黄金回旋",
-                if (goldenSpin) "点击桌宠时会旋转一圈" else "点击桌宠时将其旋转一圈",
-                goldenSpin,
-            ) { on -> scope.launch { cfg.setGoldenSpin(on) } }
         }
         Section("点击互动") {
             SwitchRow("点击音效", "点击桌宠时的 Q 弹音效", clickSound) { on -> scope.launch { cfg.setClickSound(on) } }
@@ -662,6 +667,99 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
             }
             SwitchRow("点击显示余额", "点击同时查询 DeepSeek 余额", clickBalance) { on -> scope.launch { cfg.setClickShowBalance(on) } }
             SwitchRow("点击自言自语", "点击时随机显示一条自言自语", clickSelfTalk) { on -> scope.launch { cfg.setClickShowSelfTalk(on) } }
+        }
+        // ---- 音乐播放（自传音乐；播放时桌宠一直播「悠闲哼歌」，边缘探头时不播）----
+        Section("音乐") {
+            val player = remember { com.dshpet.android.pet.PetMusicPlayer.get(ctx) }
+            var tracks by remember { mutableStateOf(player.trackNames()) }
+            var uploadMsg by remember { mutableStateOf<String?>(null) }
+            // 播放状态实时刷新（"正在播放"标记、曲目数量变化）
+            var musicState by remember { mutableStateOf(player.state()) }
+            DisposableEffect(player) {
+                val l: (com.dshpet.android.pet.PetMusicPlayer.State) -> Unit = { musicState = it }
+                player.addListener(l)
+                onDispose { player.removeListener(l) }
+            }
+            LaunchedEffect(musicState.total) { tracks = player.trackNames() }
+            val musicVolume by cfg.flowInt("music_volume", 80).collectAsState(initial = 80)
+
+            val musicPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+                if (uris.isNotEmpty()) {
+                    scope.launch {
+                        val added = withContext(Dispatchers.IO) {
+                            var n = 0
+                            uris.forEach { u ->
+                                runCatching {
+                                    val name = queryDisplayName(ctx, u) ?: "music_${System.currentTimeMillis()}"
+                                    val target = com.dshpet.android.pet.PetMusicPlayer.uniqueTarget(ctx, name)
+                                    ctx.contentResolver.openInputStream(u)?.use { input ->
+                                        target.outputStream().use { output -> input.copyTo(output) }
+                                        n++
+                                    }
+                                }
+                            }
+                            n
+                        }
+                        player.reload()
+                        tracks = player.trackNames()
+                        uploadMsg = if (added > 0) "已导入 $added 首音乐" else "导入失败：无法读取所选文件"
+                    }
+                }
+            }
+
+            SettingRow(
+                "上传音乐",
+                if (tracks.isEmpty()) "从本机选择音频文件（mp3 / m4a / flac / ogg / wav 等），复制到应用内保存"
+                else "已导入 ${tracks.size} 首 · 播放列表见长按菜单「音乐」",
+                trailing = {
+                    TextButton(onClick = { musicPicker.launch("audio/*") }) {
+                        Text(if (tracks.isEmpty()) "选择文件" else "继续添加")
+                    }
+                },
+            )
+            uploadMsg?.let {
+                Text(it, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 18.dp, vertical = 2.dp))
+            }
+            Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("音乐音量", Modifier.width(90.dp), fontSize = 13.sp)
+                CommitSlider(musicVolume.toFloat(), 0f..100f) {
+                    player.setVolume(it / 100f)
+                    scope.launch { cfg.setMusicVolume(it.toInt()) }
+                }
+                Text("$musicVolume%", Modifier.width(44.dp), fontSize = 12.sp, textAlign = androidx.compose.ui.text.style.TextAlign.End)
+            }
+            if (tracks.isNotEmpty()) {
+                Text(
+                    "播放列表（点击播放）",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 18.dp, top = 4.dp),
+                )
+                tracks.forEachIndexed { i, name ->
+                    SettingRow(
+                        name,
+                        subtitle = if (i == musicState.position - 1 && musicState.playing) "正在播放" else null,
+                        trailing = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                TextButton(onClick = { scope.launch { player.playAt(i) } }) { Text("播放") }
+                                IconButton(onClick = {
+                                    scope.launch {
+                                        withContext(Dispatchers.IO) { player.deleteFileAt(i) }
+                                        player.reload()
+                                        tracks = player.trackNames()
+                                    }
+                                }) { Icon(Icons.Filled.Delete, "删除", tint = MaterialTheme.colorScheme.error) }
+                            }
+                        },
+                    )
+                }
+            }
+            Text(
+                "播放音乐时桌宠会一直播放「悠闲哼歌」动画；处于边缘探头状态时不播放。本功能不含歌词。",
+                fontSize = 11.sp, lineHeight = 16.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 6.dp),
+            )
         }
     }
 }

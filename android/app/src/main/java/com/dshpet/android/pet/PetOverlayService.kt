@@ -60,6 +60,9 @@ open class PetOverlayService : Service() {
         /** 服务子类硬上限（0..9 共 10 个实例槽位；设置里可配 0=不限） */
         const val SLOT_COUNT = 10
 
+        /** 音乐播放时桌宠固定播放的动画名（素材缺失则回退正常动画链） */
+        const val HUMMING_ANIM = "悠闲哼歌"
+
         /** 进程级多开上限缓存（设置可调；0 = 无限制；PetApp 启动时同步） */
         @Volatile
         var maxInstances: Int = 4
@@ -163,7 +166,6 @@ open class PetOverlayService : Service() {
     private var curClickSound = true
     internal var curClickSoundChoice = "default"
     internal var curEdgePeek = false
-    internal var curGoldenSpin = false
     private var curClickBalance = false
     private var curClickSelfTalk = false
     private var visible = true
@@ -295,7 +297,12 @@ open class PetOverlayService : Service() {
         easterEggs.clear()
         container?.let { runCatching { wm.removeView(it) } }
         runCatching { videoView.release() }
-        spinAnim?.cancel()
+        // 音乐：桌宠全部退出后暂停（曲目/音量已持久化，下次打开继续沿用）
+        music?.let { p ->
+            p.removeListener(musicListener)
+            if (activeInstanceIds().isEmpty()) runCatching { p.pause() }
+        }
+        music = null
         soundPool?.release()
         CoroutineScope(Dispatchers.Main).launch {
             if (activeInstanceIds().isEmpty()) config.setPetRunning(false)
@@ -381,9 +388,8 @@ open class PetOverlayService : Service() {
         // 点击音效自选（default=内置 Q 弹 / duck=鸭子音效）
         curClickSound = config.clickSound()
         curClickSoundChoice = config.clickSoundChoice()
-        // 功能开关：边缘探头 / 黄金回旋
+        // 功能开关：边缘探头
         curEdgePeek = config.edgePeekEnabled()
-        curGoldenSpin = config.goldenSpinEnabled()
         // 点击台词绑定（上游 v4.1.0）
         curClickTalk = config.clickTalk()
         curThrowStrength = config.throwStrength()
@@ -403,9 +409,6 @@ open class PetOverlayService : Service() {
 
         // 设置监听（改动即时生效）
         observeSettings()
-
-        // 边缘探头：启动即吸附到屏幕边缘（只播待机动画）
-        if (curEdgePeek) applyEdgePeek(true)
 
         // 启动动画链
         engine.start()
@@ -454,6 +457,8 @@ open class PetOverlayService : Service() {
             CollisionHub.onImpact = { playCollisionSound() }
         }
         scheduleSelfTalk()
+        // 音乐播放（进程级单例，多开共用；播放时桌宠一直播「悠闲哼歌」）
+        setupMusic()
         applyOpacity()
         AppLog.log(
             "SVC",
@@ -700,11 +705,7 @@ open class PetOverlayService : Service() {
                     }
                     val threshold = (PetEngine.DRAG_THRESHOLD * curScale * density).coerceAtLeast(12.0)
                     if (!dragging && hypot(dx.toDouble(), dy.toDouble()) > threshold) {
-                        if (curEdgePeek) {
-                            // 边缘探头：禁止拖动（位置由吸附逻辑管理），点击仍有效
-                            return@setOnTouchListener true
-                        }
-                        if (curLock) {
+                        if (curLock && !peeking) {
                             // 锁定位置：忽略拖动（保留长按菜单，不设无限质量）
                             return@setOnTouchListener true
                         }
@@ -715,6 +716,8 @@ open class PetOverlayService : Service() {
                             uiHandler.removeCallbacks(longPressRunnable)
                             return@setOnTouchListener true
                         }
+                        // 边缘探头状态下把桌宠抓起来：立即脱离贴边（保持当前位置），跟手拖动
+                        if (peeking) exitPeek(restorePosition = false)
                         uiHandler.removeCallbacks(longPressRunnable)
                         dragging = true
                         engine.onDragStart()
@@ -781,6 +784,8 @@ open class PetOverlayService : Service() {
                         } else {
                             savePosition()
                         }
+                        // 边缘探头：松手时若已贴到屏幕左/右缘 → 吸附探头
+                        if (curEdgePeek) maybeEnterPeek()
                     } else if (!longPressFired && !justDragged) {
                         onTap()
                     } else if (longPressFired && curShiftDrag && !justDragged) {
@@ -817,8 +822,6 @@ open class PetOverlayService : Service() {
         lastTapMs = now
         engine.onTap()
         squash()
-        // 黄金回旋（v2.0.0）：点击时旋转一圈
-        if (curGoldenSpin) goldenSpin()
         // 点击台词绑定（上游 v4.1.0：自定义台词+动画）
         val talk = curClickTalk
         if (talk.isNotBlank()) {
@@ -850,87 +853,94 @@ open class PetOverlayService : Service() {
         anim.start()
     }
 
-    // ================================================================ 黄金回旋
-    private var spinAnim: android.animation.ValueAnimator? = null
-
-    /** 黄金回旋（v2.0.0）：点击时桌宠绕中心旋转一圈 */
-    private fun goldenSpin() {
-        spinAnim?.cancel()
-        videoView.pivotX = videoView.width / 2f
-        videoView.pivotY = videoView.height / 2f
-        val anim = android.animation.ValueAnimator.ofFloat(0f, 360f).apply {
-            duration = 600
-            interpolator = android.view.animation.DecelerateInterpolator()
-            addUpdateListener {
-                videoView.rotation = it.animatedValue as Float
-            }
-            addListener(object : android.animation.AnimatorListenerAdapter() {
-                override fun onAnimationEnd(animation: android.animation.Animator) {
-                    videoView.rotation = 0f
-                }
-
-                override fun onAnimationCancel(animation: android.animation.Animator) {
-                    videoView.rotation = 0f
-                }
-            })
-        }
-        spinAnim = anim
-        anim.start()
-    }
-
     // ================================================================ 边缘探头
-    /** 退出探头时恢复的位置（探头开启瞬间记录的吸附前位置） */
+    /** 是否正贴在屏幕边缘探头（开启「边缘探头」后被拖到屏幕左/右缘时进入） */
+    internal var peeking = false
+    /** 退出探头时恢复的位置（进入探头瞬间记录的吸附前位置） */
     private var peekRestoreX = -1
     private var peekRestoreY = -1
     private var peekRestoreFacing = "left"
+    /** 露出窗口宽度占比：素材内容约占画布 x[30%..70%]，露出 50% 才看得见角色 */
+    private val peekVisibleFrac = 0.50
 
     /**
-     * 边缘探头：桌宠吸附到屏幕边缘，像探头张望——窗口大部分移出屏幕，
-     * 只露出动画内容的一部分。开启期间引擎强制 idleOnly（只播待机动画），
-     * 防止移动/转向/动作动画导致位置或朝向错乱；关闭后恢复原位置。
+     * 边缘探头开关（用户设置）：开启后不再立即吸附，只有把桌宠**拖到屏幕左/右边缘**
+     * 松手时才会贴边探头（[maybeEnterPeek]）。关闭时若正处于探头状态则退出并恢复原位。
      */
     private fun applyEdgePeek(on: Boolean) {
         curEdgePeek = on
-        engine.idleOnly = on
-        engine.cancelMove()
-        // 探头期间锁死自动移动
-        engine.noMove = on || curNoMove
-        if (on) {
-            // 记录吸附前位置（供关闭时恢复）
-            peekRestoreX = engine.winX
-            peekRestoreY = engine.winY
-            peekRestoreFacing = engine.facing
-        }
-        // 吸附方向跟随当前朝向（facing=left → 贴左边缘探头，镜像校正后朝右看）
-        val (sw, sh) = screenPx()
-        val ww = engine.winW
-        val hh = engine.winH
-        if (on) {
-            val toLeft = engine.facing != "right"
-            val peekW = (ww * 0.30).toInt()          // 露出宽度：约窗口 30%
-            val x = if (toLeft) -(ww - peekW) else sw - peekW
-            // 垂直贴近底部，保留底部呼吸空间
-            val y = (sh - hh - (hh * 0.12).toInt()).coerceAtLeast(0)
-            moveWindowUnclamped(x, y)
-            // 探头方向：贴左边朝右看、贴右边朝左看（面对屏内）
-            engine.setFacing(if (toLeft) "right" else "left")
-            videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
-            persistFacing(if (toLeft) "right" else "left")
-            engine.switchToIdle()
-            savePosition()
+        if (!on) {
+            exitPeek(restorePosition = true)
         } else {
-            // 恢复吸附前位置（重新 clamp 到正常窗口范围）
+            showBubble("边缘探头已开启：把桌宠拖到屏幕左/右边缘试试～", 4000)
+        }
+    }
+
+    /** 松手时判断是否贴在屏幕边缘；是则进入探头状态（贴左/贴右由位置决定） */
+    private fun maybeEnterPeek() {
+        if (!curEdgePeek || peeking) return
+        val xr = windowXRange()
+        val tol = (screenPx().first * 0.03).toInt().coerceIn(24, 96)
+        val atLeft = engine.winX <= xr.first + tol
+        val atRight = engine.winX >= xr.last - tol
+        if (!atLeft && !atRight) return
+        enterPeek(atLeft)
+    }
+
+    /**
+     * 进入探头状态：把窗口大半移出屏幕，只露出角色所在的一侧，像探头张望。
+     * 期间引擎强制 idleOnly（只播待机动画）+ 禁止自动移动，防止位置/朝向错乱。
+     */
+    private fun enterPeek(toLeft: Boolean) {
+        if (peeking) return
+        peeking = true
+        peekRestoreX = engine.winX
+        peekRestoreY = engine.winY
+        peekRestoreFacing = engine.facing
+        // 探头期间不接受抛掷物理（否则物理 ticker 会把窗口挪出贴边位置）
+        physMode = null
+        engine.cancelMove()
+        engine.idleOnly = true
+        engine.humActive = false
+        val (sw, _) = screenPx()
+        val ww = engine.winW
+        val peekW = (ww * peekVisibleFrac).toInt()
+        val x = if (toLeft) -(ww - peekW) else sw - peekW
+        val y = engine.winY.coerceIn(windowYRange())
+        moveWindowUnclamped(x, y)
+        // 探头方向：贴左缘朝右看、贴右缘朝左看（面对屏内）
+        engine.setFacing(if (toLeft) "right" else "left")
+        videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
+        persistFacing(engine.facing)
+        engine.switchToIdle()
+        savePosition()
+        syncAnimLocks()
+        showBubble("探头中～再拖动一下就能回来", 3000)
+    }
+
+    /** 退出探头状态。[restorePosition] = 恢复进入探头前的位置（被抓着拖走时传 false） */
+    private fun exitPeek(restorePosition: Boolean) {
+        if (!peeking) return
+        peeking = false
+        engine.idleOnly = false
+        engine.noMove = curNoMove
+        if (restorePosition) {
             val xr = windowXRange(); val yr = windowYRange()
             val rx = peekRestoreX.takeIf { it >= 0 }?.coerceIn(xr.first, xr.last)
             val ry = peekRestoreY.takeIf { it >= 0 }?.coerceIn(yr.first, yr.last)
             if (rx != null && ry != null) moveWindowUnclamped(rx, ry)
-            // 恢复吸附前朝向与镜像
             engine.setFacing(peekRestoreFacing)
-            videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
-            engine.noMove = curNoMove
-            engine.switchToIdle()
-            savePosition()
+        } else {
+            // 保持当前（贴边）位置，但收敛到正常可拖动范围，避免拖动第一帧跳变
+            moveWindowUnclamped(
+                engine.winX.coerceIn(windowXRange()),
+                engine.winY.coerceIn(windowYRange()),
+            )
         }
+        videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
+        engine.switchToIdle()
+        savePosition()
+        syncAnimLocks()
     }
 
     /** 不理会窗口 clamp 直接定位（探头状态允许窗口越出屏幕） */
@@ -1048,7 +1058,7 @@ open class PetOverlayService : Service() {
         watch(c.flowInt("move_max_px", 240)) { v ->
             engine.moveMaxPx = (v as Int).coerceAtLeast(engine.moveMinPx)
         }
-        watch(c.flowBool("no_move", false)) { v -> curNoMove = v as Boolean; engine.noMove = curNoMove }
+        watch(c.flowBool("no_move", false)) { v -> curNoMove = v as Boolean; syncAnimLocks() }
         watch(c.flowBool("lock_position", false)) { v -> curLock = v as Boolean }
         watch(c.flowBool("mouse_through", false)) { v -> curMouseThrough = v as Boolean; applyTouchThrough() }
         watch(c.flowBool("shift_drag", false)) { v -> curShiftDrag = v as Boolean }
@@ -1073,12 +1083,20 @@ open class PetOverlayService : Service() {
         watch(c.flowString("click_sound_choice", "default")) { v ->
             curClickSoundChoice = if (v == "duck") "duck" else "default"
         }
+        // 音乐音量（设置页滑块；与点击音效音量独立）
+        watch(c.flowInt("music_volume", 80)) { v -> musicPlayer().setVolume((v as Int).coerceIn(0, 100) / 100f) }
+        // 曲目下标（其它入口改过时同步，播放中不打断）
+        watch(c.flowInt("music_index", 0)) { v ->
+            val p = music
+            val i = (v as Int).coerceAtLeast(0)
+            if (p != null && !p.isPlaying() && i != p.index) p.index = i
+        }
         watch(c.flowBool("edge_peek_enabled", false)) { v ->
             val on = v as Boolean
             if (on == curEdgePeek) return@watch
             applyEdgePeek(on)
         }
-        watch(c.flowBool("golden_spin_enabled", false)) { v -> curGoldenSpin = v as Boolean }
+        
         watch(c.flowBool("click_show_balance", false)) { v -> curClickBalance = v as Boolean }
         watch(c.flowBool("click_show_self_talk", false)) { v -> curClickSelfTalk = v as Boolean }
         watch(c.flowBool("self_talk_enabled", false)) { v ->
@@ -1254,11 +1272,11 @@ open class PetOverlayService : Service() {
         val (sw, sh) = screenPx()
         val cornerX = (sw - engine.winW - 24).coerceAtLeast(0)
         val cornerY = (sh - engine.winH - 24).coerceAtLeast(0)
-        if (curEdgePeek) {
+        if (peeking) {
             // 先退出边缘探头：把"恢复位置"改成目标角落，退出时会落到这里
             peekRestoreX = cornerX
             peekRestoreY = cornerY
-            scope.launch { config.setEdgePeek(false) }
+            exitPeek(restorePosition = true)
             return
         }
         engine.cancelMove()
@@ -1280,6 +1298,73 @@ open class PetOverlayService : Service() {
 
     private fun persistFacing(f: String) {
         scope.launch { config.setFacing(f) }
+    }
+
+    // ================================================================ 音乐播放
+    /** 进程级音乐播放器（多开实例共用同一播放器与播放列表） */
+    private var music: PetMusicPlayer? = null
+    /** 上次应用的哼歌锁状态（避免每帧重复切动画） */
+    private var humApplied = false
+
+    /** 播放状态变化 → 同步桌宠动画（哼歌） */
+    private val musicListener: (PetMusicPlayer.State) -> Unit = { syncAnimLocks() }
+
+    /** 取得播放器并接好状态回调（曲目下标写回 DataStore） */
+    internal fun musicPlayer(): PetMusicPlayer = music ?: PetMusicPlayer.get(this).also {
+        music = it
+        it.addListener(musicListener)
+        it.onIndexChanged = { idx -> scope.launch { config.setMusicIndex(idx) } }
+    }
+
+    private suspend fun setupMusic() {
+        val p = musicPlayer()
+        p.index = config.musicIndex()
+        p.setVolume(config.musicVolume() / 100f)
+        p.ensureLoaded()
+        engine.humTune = HUMMING_ANIM.takeIf { n -> engine.hasAnim(n) }
+        syncAnimLocks()
+    }
+
+    /**
+     * 同步动画锁，优先级：边缘探头（idleOnly）> 音乐哼歌 > 不移动。
+     * 音乐播放中且未处于边缘探头状态 → 引擎始终播放「悠闲哼歌」。
+     */
+    internal fun syncAnimLocks() {
+        if (!this::engine.isInitialized) return
+        val p = music ?: return
+        val hum = p.isPlaying() && !peeking && engine.hasAnim(HUMMING_ANIM)
+        engine.humActive = hum
+        if (hum != humApplied) {
+            humApplied = hum
+            if (hum) {
+                engine.cancelMove()
+                engine.switch(HUMMING_ANIM)
+            } else if (engine.anim == HUMMING_ANIM) {
+                engine.switchToIdle()
+            }
+        }
+        engine.noMove = curNoMove || peeking || hum
+    }
+
+    // ---- 长按菜单音乐控制（左右键切歌 / 播放暂停 / 指定曲目）----
+    fun musicToggle() {
+        musicPlayer().apply { ensureLoaded(); toggle() }
+        syncAnimLocks()
+    }
+
+    fun musicNext() {
+        musicPlayer().apply { ensureLoaded(); next() }
+        syncAnimLocks()
+    }
+
+    fun musicPrev() {
+        musicPlayer().apply { ensureLoaded(); prev() }
+        syncAnimLocks()
+    }
+
+    fun musicPlayAt(i: Int) {
+        musicPlayer().apply { ensureLoaded(); playAt(i) }
+        syncAnimLocks()
     }
 
     // ================================================================ 音效

@@ -35,6 +35,10 @@ class PetEngine(
     var noMove = false
     /** 边缘探头模式：只允许播放待机动画，其它动画一律不走（防止移出边缘/换向出问题） */
     var idleOnly = false
+    /** 音乐播放中的哼歌动画名（"悠闲哼歌"；素材缺失时为 null） */
+    var humTune: String? = null
+    /** 音乐播放中：引擎始终播放 [humTune]（边缘探头状态由服务置 false） */
+    @Volatile var humActive = false
     var animationGapSeconds = 0.0
     var playbackSpeed = 1.0
 
@@ -119,6 +123,13 @@ class PetEngine(
             idles.firstOrNull()?.let { anim = it; play(it) }
             return
         }
+        val hum = humTune
+        if (humActive && hum != null && name != hum) {
+            // 音乐播放中：始终播放哼歌
+            anim = hum
+            play(hum)
+            return
+        }
         anim = name
         play(name)
     }
@@ -128,6 +139,12 @@ class PetEngine(
         if (idleOnly) {
             // 边缘探头：播完待机继续播待机（随机不重复当前）
             idles.pick(exclude = name).also { switch(it) }
+            return
+        }
+        val hum = humTune
+        if (humActive && hum != null) {
+            // 音乐播放中：哼歌循环
+            switch(hum)
             return
         }
         val drag = dragName

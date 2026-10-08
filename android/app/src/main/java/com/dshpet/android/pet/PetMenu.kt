@@ -32,6 +32,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.PlayArrow
@@ -48,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -171,6 +175,7 @@ class PetMenu(
         var animHubOpen by remember { mutableStateOf(false) }
         var quickOpen by remember { mutableStateOf(false) }
         var funcOpen by remember { mutableStateOf(false) }
+        var musicOpen by remember { mutableStateOf(false) }
         val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
         val blurOn = blurCfg && Build.VERSION.SDK_INT >= 31
         // 写入必须挂在服务级作用域：菜单 onDismiss 会立刻销毁窗口组合，
@@ -186,7 +191,7 @@ class PetMenu(
         }
 
         // 功能面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
-        androidx.compose.runtime.LaunchedEffect(funcOpen) {
+        androidx.compose.runtime.LaunchedEffect(funcOpen, musicOpen) {
             androidx.compose.runtime.withFrameNanos { }
             view?.post { locate() }
         }
@@ -248,6 +253,8 @@ class PetMenu(
                     }
                     if (funcOpen) {
                         FuncPanel(cfg, blurOn, onBack = { funcOpen = false }, run, runKeep)
+                    } else if (musicOpen) {
+                        MusicPanel(blurOn, onBack = { musicOpen = false }, runKeep = runKeep)
                     } else if (animHubOpen) {
                         AnimHub(onBack = { animHubOpen = false }) { name -> run { engine.switch(name) } }
                     } else if (quickOpen) {
@@ -269,17 +276,16 @@ class PetMenu(
                         SpeedSubmenu(speedOpen) { v -> run { cfg.setPlaybackSpeed(v) } }
                         MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(menuPetScale)) { sizeOpen = !sizeOpen; speedOpen = false }
                         SizeSubmenu(sizeOpen, menuPetScale) { v -> run { cfg.setScale(v) } }
+                        // ---- 音乐（当前播放 + 左右键切歌）----
+                        MenuGroup("音乐")
+                        MusicBar(runKeep)
+                        MenuItem(Icons.Filled.List, "音乐列表") { musicOpen = true }
                         // ---- 功能（展开功能页）----
                         MenuGroup("功能")
                         MenuItem(
                             Icons.Filled.Search,
                             "边缘探头",
                             badge = if (service.curEdgePeek) "开" else null,
-                        ) { funcOpen = true }
-                        MenuItem(
-                            Icons.Filled.Refresh,
-                            "黄金回旋",
-                            badge = if (service.curGoldenSpin) "开" else null,
                         ) { funcOpen = true }
                         MenuItem(
                             Icons.Filled.Star,
@@ -302,7 +308,7 @@ class PetMenu(
         }
     }
 
-    /** 功能面板：边缘探头 / 黄金回旋 / 点击音效自选 + 原功能分类项 */
+    /** 功能面板：边缘探头 / 点击音效自选 + 原功能分类项 */
     @Composable
     private fun FuncPanel(
         cfg: PetConfig,
@@ -312,7 +318,6 @@ class PetMenu(
         runKeep: (suspend () -> Unit) -> Unit,
     ) {
         var edgePeek by remember { mutableStateOf(service.curEdgePeek) }
-        var goldenSpin by remember { mutableStateOf(service.curGoldenSpin) }
         var noMove by remember { mutableStateOf(engine.noMove) }
         var lock by remember { mutableStateOf(service.curLock) }
         var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
@@ -360,13 +365,9 @@ class PetMenu(
                 HorizontalDivider(Modifier.padding(horizontal = 14.dp))
                 // ---- 新功能 ----
                 MenuGroup("新功能")
-                ToggleItem(Icons.Filled.Search, "边缘探头", edgePeek, sub = "贴边探头，只播待机") {
+                ToggleItem(Icons.Filled.Search, "边缘探头", edgePeek, sub = "拖到屏幕左右边缘自动贴边探头") {
                     edgePeek = !edgePeek
                     runKeep { cfg.setEdgePeek(edgePeek) }
-                }
-                ToggleItem(Icons.Filled.Refresh, "黄金回旋", goldenSpin, sub = "点击旋转一圈") {
-                    goldenSpin = !goldenSpin
-                    runKeep { cfg.setGoldenSpin(goldenSpin) }
                 }
                 // ---- 点击音效自选 ----
                 MenuGroup("点击音效")
@@ -400,6 +401,169 @@ class PetMenu(
                 }
                 MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
                 MenuItem(Icons.Filled.Star, "灵动岛") { run { service.toggleIsland() } }
+            }
+        }
+    }
+
+    // ================================================================ 音乐（长按菜单）
+    /** 订阅播放器状态：菜单打开期间实时刷新当前曲目 */
+    @Composable
+    private fun rememberMusicState(): PetMusicPlayer.State {
+        val player = remember { service.musicPlayer() }
+        var st by remember { mutableStateOf(player.state()) }
+        DisposableEffect(player) {
+            val l: (PetMusicPlayer.State) -> Unit = { st = it }
+            player.addListener(l)
+            onDispose { player.removeListener(l) }
+        }
+        return st
+    }
+
+    /** 音乐条：显示当前播放曲目，左右键切歌（点曲名 = 播放/暂停） */
+    @Composable
+    private fun MusicBar(runKeep: (suspend () -> Unit) -> Unit) {
+        val st = rememberMusicState()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(
+                onClick = { runKeep { service.musicPrev() } },
+                enabled = st.hasTracks,
+                modifier = Modifier.height(30.dp),
+            ) {
+                Icon(
+                    Icons.Filled.KeyboardArrowLeft, contentDescription = "上一首",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.width(22.dp),
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable { runKeep { service.musicToggle() } }
+                    .padding(vertical = 2.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(st.title, fontSize = 12.sp, maxLines = 1)
+                Text(
+                    if (!st.hasTracks) "未上传音乐（设置 → 桌宠 → 音乐）"
+                    else "${st.position}/${st.total} · ${if (st.playing) "播放中" else "已暂停"}（点击播放/暂停）",
+                    fontSize = 9.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
+            IconButton(
+                onClick = { runKeep { service.musicNext() } },
+                enabled = st.hasTracks,
+                modifier = Modifier.height(30.dp),
+            ) {
+                Icon(
+                    Icons.Filled.KeyboardArrowRight, contentDescription = "下一首",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.width(22.dp),
+                )
+            }
+        }
+    }
+
+    /** 音乐列表面板：当前曲目 + 全部曲目（点击播放）+ 上传提示（无歌词功能） */
+    @Composable
+    private fun MusicPanel(
+        blurOn: Boolean,
+        onBack: () -> Unit,
+        runKeep: (suspend () -> Unit) -> Unit,
+    ) {
+        val player = remember { service.musicPlayer() }
+        val st = rememberMusicState()
+        var names by remember { mutableStateOf(player.trackNames()) }
+        // 上传/删除音乐后（total 变化）重新读取列表
+        androidx.compose.runtime.LaunchedEffect(st.total) { names = player.trackNames() }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = if (blurOn) Color(0xE6FFFFFF) else MaterialTheme.colorScheme.surface,
+            shadowElevation = 6.dp,
+            tonalElevation = 1.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                onWindowDrag(dragAmount.x, dragAmount.y)
+                            }
+                        }
+                        .clickable(onClick = onBack)
+                        .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("◀ 返回", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        "音乐",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 10.dp),
+                    )
+                }
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
+                MusicBar(runKeep)
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
+                if (names.isEmpty()) {
+                    Text(
+                        "还没有音乐文件。前往 设置 → 桌宠 → 音乐 上传（支持 mp3 / m4a / flac / ogg / wav 等）。",
+                        fontSize = 11.sp, lineHeight = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                } else {
+                    MenuGroup("播放列表（点击播放）")
+                    names.forEachIndexed { i, name ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { runKeep { service.musicPlayAt(i) } }
+                                .padding(start = 20.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "${i + 1}. $name",
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                color = if (i == st.position - 1) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (i == st.position - 1) {
+                                Icon(
+                                    Icons.Filled.Check, null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.width(14.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "播放音乐时桌宠会一直播放「悠闲哼歌」（边缘探头时不播放）",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                )
             }
         }
     }
