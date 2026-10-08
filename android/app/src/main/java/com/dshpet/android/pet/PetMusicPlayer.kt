@@ -43,7 +43,7 @@ class PetMusicPlayer private constructor(ctx: Context) {
      * 返回是否删除成功。
      */
     fun deleteFileAt(i: Int): Boolean =
-        runCatching { tracks.getOrNull(i)?.delete() }.getOrDefault(false)
+        runCatching { tracks.getOrNull(i)?.delete() == true }.getOrDefault(false)
 
     /** 曲目切换回调（服务写回 DataStore 记住下标） */
     var onIndexChanged: ((Int) -> Unit)? = null
