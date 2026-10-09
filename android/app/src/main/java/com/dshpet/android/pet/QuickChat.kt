@@ -68,7 +68,7 @@ class QuickChat(private val ctx: Context) {
     private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var view: View? = null
     private var lp: WindowManager.LayoutParams? = null
-    private val vm: ChatViewModel = ChatViewModel(ctx.applicationContext as Application)
+    private val vm: ChatViewModel = ChatViewModel.shared(ctx.applicationContext as Application)
 
     fun show(anchorX: Int, anchorY: Int) {
         dismiss()
@@ -193,10 +193,7 @@ class QuickChat(private val ctx: Context) {
                     Spacer(Modifier.width(6.dp))
                     IconButton(
                         onClick = {
-                            if (input.isNotBlank()) {
-                                vm.send(input)
-                                input = ""
-                            }
+                            if (input.isNotBlank() && vm.send(input)) input = ""
                         },
                         modifier = Modifier
                             .clip(RoundedCornerShape(18.dp))

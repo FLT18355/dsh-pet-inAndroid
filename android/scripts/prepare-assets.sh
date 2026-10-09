@@ -16,7 +16,6 @@
 #   pet/text_clips.json                含文字动画（转向时不镜像）
 #   pet/sounds/click.wav / click2.wav     点击音效（运行时交替播放）
 #   pet/chat/*.jpg                     聊天窗口背景
-#   pet/easter/*.*                     彩蛋弹窗图片池
 #   pet/thumbs/<folder>/<名>.webp      动画缩略图（设置页动画集用）
 #
 # 用法：bash android/scripts/prepare-assets.sh [--force]
@@ -34,7 +33,7 @@ command -v ffmpeg >/dev/null || { echo "错误：需要 ffmpeg（构建机一次
 command -v ffprobe >/dev/null || { echo "错误：需要 ffprobe"; exit 1; }
 
 rm -rf "$OUT"
-mkdir -p "$OUT/videos" "$OUT/sounds" "$OUT/chat" "$OUT/easter" "$OUT/thumbs"
+mkdir -p "$OUT/videos" "$OUT/sounds" "$OUT/chat" "$OUT/thumbs"
 
 echo "== 素材预处理 → $OUT =="
 
@@ -103,7 +102,6 @@ PY
 cp -f "$SRC_CHARS/shenshen/videos/text_clips.json" "$OUT/text_clips.json" 2>/dev/null || true
 cp -f "$ROOT/assets/sounds/"* "$OUT/sounds/" 2>/dev/null || true
 cp -f "$ROOT/assets/chat/"* "$OUT/chat/" 2>/dev/null || true
-cp -f "$ROOT/assets/big_blue_fat_fish/"* "$OUT/easter/" 2>/dev/null || true
 
 # ---------- 4. 缩略图（设置页动画集） ----------
 thumb_one() {

@@ -268,7 +268,6 @@ class PetMenu(
                         // ---- 互动 ----
                         MenuGroup("互动")
                         MenuItem(Icons.Filled.Send, "AI 对话") { run { service.openChat() } }
-                        MenuItem(Icons.Filled.Star, "欧鲸鲸（彩蛋）") { run { service.spawnEasterEgg() } }
                         // ---- 播放 ----
                         MenuGroup("播放")
                         MenuItem(Icons.Filled.PlayArrow, "动画集") { animHubOpen = true }

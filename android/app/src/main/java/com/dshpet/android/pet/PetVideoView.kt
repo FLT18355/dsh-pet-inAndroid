@@ -45,6 +45,14 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
 
     private var surfaceTexture: SurfaceTexture? = null
     private var surface: android.view.Surface? = null
+    /**
+     * 已释放标志：置位后 GL 线程不再触碰纹理/Surface。
+     * 释放顺序必须为 window.removeView → onDetachedFromWindow（本类）或在服务里
+     * 先 release() 再 removeView；绝不能在解码器仍在向 Surface 出帧、GL 线程仍在
+     * updateTexImage 时 release() SurfaceTexture —— 那是原生竞态，可能直接打挂
+     * SurfaceFlinger（表现为整机只剩画面、触摸与电源键全部无响应）。
+     */
+    @Volatile private var released = false
     private var textureId = 0
     private var program = 0
     private var uTexLoc = 0
@@ -161,6 +169,10 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         }
 
         private fun onDrawFrameInternal() {
+            if (released) {
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                return
+            }
             val st = surfaceTexture ?: run {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 return
@@ -200,7 +212,10 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         //（对应桌面端 WA_TranslucentBackground 的 surface 层等效）。
         holder.setFormat(android.graphics.PixelFormat.TRANSLUCENT)
         setRenderer(renderer)
-        renderMode = RENDERMODE_CONTINUOUSLY
+        // 仅在有新帧时渲染：持续 60fps 透明 GL 合成在平板 GPU 上开销极大
+        // （多开时更甚），按需渲染可显著降低负载与驱动风险。
+        // SurfaceTexture 的 onFrameAvailable 已调用 requestRender()。
+        renderMode = RENDERMODE_WHEN_DIRTY
         setZOrderOnTop(true)
     }
 
@@ -233,7 +248,9 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     } else 0L
 
     fun setMirror(m: Boolean) {
+        if (mirror == m) return
         mirror = m
+        requestRender()
     }
 
     fun setPlaybackSpeed(speed: Float) {
@@ -256,15 +273,34 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
 
     private var lastPlayed: Triple<String, String, Float>? = null
 
+    /**
+     * 释放播放器与纹理。顺序很关键（见 [released] 注释）：
+     * 1) 置 released，GL 线程后续帧直接跳过；
+     * 2) 断开 ExoPlayer 的视频输出并释放（停止向 Surface 出帧）；
+     * 3) 纹理/Surface 的 release 放到 GL 线程队列执行（与 onDrawFrame 串行，
+     *    避免"解码器/GL 线程正在用 → 主线程 release"的原生竞态）。
+     */
     fun release() {
-        player.release()
+        released = true
+        runCatching { player.setVideoSurface(null) }
+        runCatching { player.release() }
+        runCatching {
+            queueEvent {
+                runCatching { surfaceTexture?.release() }
+                surfaceTexture = null
+                runCatching { surface?.release() }
+                surface = null
+            }
+        }
     }
 
     override fun onDetachedFromWindow() {
-        super.onDetachedFromWindow()
+        released = true
         ready = false
-        surface?.release()
-        surfaceTexture?.release()
+        // 只断开解码输出，绝不在此处 release SurfaceTexture：
+        // super 只是"请求"GL 线程退出（异步），此刻纹理可能仍被使用。
+        runCatching { player.setVideoSurface(null) }
+        super.onDetachedFromWindow()
     }
 
     /** 播放就绪后 5 秒仍无首帧 → 记录日志并重连 surface 重试（排查黑屏） */

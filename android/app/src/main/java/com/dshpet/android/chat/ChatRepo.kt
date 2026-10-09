@@ -76,16 +76,27 @@ class ChatRepo(private val ctx: Context) {
             ?: emptyList()
     }
 
-    suspend fun get(id: String): Session? = withContext(Dispatchers.IO) {
+    /**
+     * 多个界面/窗口（全屏对话、悬浮对话、快捷气泡）可能同时持有同一会话的内存副本，
+     * 全量 save() 会互相覆盖 → 统一在 [ioLock] 内做"读-改-写"，只允许追加，不整体回写。
+     */
+    private val ioLock = Any()
+
+    private fun readFile(id: String): Session? = runCatching {
         val f = File(dir, "$id.json")
-        if (!f.exists()) null
-        else try { Session.fromJson(JSONObject(f.readText())) } catch (e: Exception) { null }
+        if (!f.exists()) null else Session.fromJson(JSONObject(f.readText()))
+    }.getOrNull()
+
+    private fun writeFile(s: Session) {
+        s.updatedAt = System.currentTimeMillis()
+        dir.mkdirs()
+        File(dir, "${s.id}.json").writeText(s.toJson().toString())
     }
 
+    suspend fun get(id: String): Session? = withContext(Dispatchers.IO) { readFile(id) }
+
     suspend fun save(session: Session) = withContext(Dispatchers.IO) {
-        session.updatedAt = System.currentTimeMillis()
-        dir.mkdirs()
-        File(dir, "${session.id}.json").writeText(session.toJson().toString())
+        synchronized(ioLock) { writeFile(session) }
     }
 
     suspend fun create(title: String = "新对话"): Session {
@@ -105,14 +116,12 @@ class ChatRepo(private val ctx: Context) {
     }
 
     suspend fun rename(id: String, title: String) = withContext(Dispatchers.IO) {
-        get(id)?.let { it.title = title; save(it) }
+        synchronized(ioLock) { readFile(id)?.let { it.title = title; writeFile(it) } }
     }
 
-    suspend fun append(id: String, message: Message) = withContext(Dispatchers.IO) {
-        get(id)?.let {
-            it.messages.add(message)
-            save(it)
-        }
+    /** 追加一条消息（读-改-写）：不会覆盖其它窗口刚写入的内容 */
+    suspend fun appendMessage(id: String, message: Message) = withContext(Dispatchers.IO) {
+        synchronized(ioLock) { readFile(id)?.let { it.messages.add(message); writeFile(it) } }
     }
 
     /** 会话标题：首条用户消息前 20 字 */

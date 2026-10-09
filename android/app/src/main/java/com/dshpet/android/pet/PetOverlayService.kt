@@ -63,6 +63,16 @@ open class PetOverlayService : Service() {
         /** 音乐播放时桌宠固定播放的动画名（素材缺失则回退正常动画链） */
         const val HUMMING_ANIM = "悠闲哼歌"
 
+        // ---- 边缘探头"只露头"可见框 ----
+        /** 可见框尺寸（占窗口比例）：宽 30%、高 52% */
+        const val PEEK_VIS_W = 0.30f
+        const val PEEK_VIS_H = 0.52f
+        /** 可见框对应的画布起点：角色内容约占 x[33%..67%]、头/上半身约 y[16%..57%] */
+        const val PEEK_VIEW_X0 = 0.36f
+        const val PEEK_VIEW_Y0 = 0.05f
+        /** 探头斜角（度）：贴左缘头朝屏内右倾，贴右缘朝左倾 */
+        const val PEEK_TILT = 12f
+
         /** 进程级多开上限缓存（设置可调；0 = 无限制；PetApp 启动时同步） */
         @Volatile
         var maxInstances: Int = 4
@@ -137,7 +147,6 @@ open class PetOverlayService : Service() {
     private var params: WindowManager.LayoutParams? = null
     private var bubble: SpeechBubble? = null
     private var menuWindow: PetMenu? = null
-    private var easterEggs = mutableListOf<EasterEggPopup>()
 
     private lateinit var engine: PetEngine
     private lateinit var catalog: PetCatalog
@@ -277,33 +286,36 @@ open class PetOverlayService : Service() {
             "onDestroy instance=$instanceId（用户退出/服务被杀/初始化失败均会到这）"
         )
         synchronized(activeInstances) { activeInstances.remove(instanceId) }
+        // 先停掉一切定时器/协程：否则 ticker 会在窗口已移除后继续 updateViewLayout
+        uiHandler.removeCallbacksAndMessages(null)
         // 必须在 scope.cancel() 之前：savePosition 内部走 scope.launch
         // （engine 未初始化时不能碰，否则会记一条无意义异常）
         if (this::engine.isInitialized) savePosition()
         scope.cancel()
-        uiHandler.removeCallbacksAndMessages(null)
         settingsJobs.forEach { it.cancel() }
+        // 先关掉所有子窗口（菜单/气泡/灵动岛/聊天/快捷对话）
         removeMenu()
         bubble?.dismiss()
         stopIsland()
         stopQuickChat()
+        dismissChat()
+        // 释放顺序：先停解码器并断开视频输出，再移除窗口（触发 GL 线程退出）。
+        // 反过来（removeView → onDetachedFromWindow 里 release 纹理）会与
+        // 仍在出帧的解码器/GL 线程竞态，可能打挂 SurfaceFlinger 导致整机假死。
+        if (this::videoView.isInitialized) runCatching { videoView.release() }
+        container?.let { runCatching { wm.removeView(it) } }
         collisionMember?.let { CollisionHub.unregister(it.id) }
         collisionMember = null
         CollisionHub.setOnMoved(instanceId, null)
         if (instanceId == 0) CollisionHub.onImpact = null
         stopAgentBus()
-        dismissChat()
-        easterEggs.forEach { it.dismiss() }
-        easterEggs.clear()
-        container?.let { runCatching { wm.removeView(it) } }
-        runCatching { videoView.release() }
         // 音乐：桌宠全部退出后暂停（曲目/音量已持久化，下次打开继续沿用）
         music?.let { p ->
-            p.removeListener(musicListener)
+            runCatching { p.removeListener(musicListener) }
             if (activeInstanceIds().isEmpty()) runCatching { p.pause() }
         }
         music = null
-        soundPool?.release()
+        runCatching { soundPool?.release() }
         CoroutineScope(Dispatchers.Main).launch {
             if (activeInstanceIds().isEmpty()) config.setPetRunning(false)
         }
@@ -841,8 +853,14 @@ open class PetOverlayService : Service() {
 
     private fun squash() {
         squashAnim?.cancel()
-        videoView.pivotX = videoView.width / 2f
-        videoView.pivotY = videoView.height.toFloat()
+        // 探头中：Q 弹必须绕探头旋转支点，否则会把斜角支点改到底边中心
+        if (peeking && peekPivotX >= 0f) {
+            videoView.pivotX = peekPivotX
+            videoView.pivotY = peekPivotY
+        } else {
+            videoView.pivotX = videoView.width / 2f
+            videoView.pivotY = videoView.height.toFloat()
+        }
         val anim = android.animation.ValueAnimator.ofFloat(1f, 0.78f, 1.06f, 1f).apply {
             duration = 240
             addUpdateListener {
@@ -860,8 +878,9 @@ open class PetOverlayService : Service() {
     private var peekRestoreX = -1
     private var peekRestoreY = -1
     private var peekRestoreFacing = "left"
-    /** 露出窗口宽度占比：素材内容约占画布 x[30%..70%]，露出 50% 才看得见角色 */
-    private val peekVisibleFrac = 0.50
+    /** 探头期间的旋转支点（点击 Q 弹会重设 pivot，需要复位回探头支点） */
+    private var peekPivotX = -1f
+    private var peekPivotY = -1f
 
     /**
      * 边缘探头开关（用户设置）：开启后不再立即吸附，只有把桌宠**拖到屏幕左/右边缘**
@@ -888,8 +907,17 @@ open class PetOverlayService : Service() {
     }
 
     /**
-     * 进入探头状态：把窗口大半移出屏幕，只露出角色所在的一侧，像探头张望。
-     * 期间引擎强制 idleOnly（只播待机动画）+ 禁止自动移动，防止位置/朝向错乱。
+     * 进入探头状态：只让**头部**从屏幕边缘探进来。
+     *
+     * 关键点：素材画布（640×360）里角色内容只占中间一条（x≈33%..67%），
+     * 若单纯把窗口移出屏幕，露出的往往是空白边距（旧版"开启后像消失"的根因）。
+     * 所以这里同时做两件事：
+     *   1) 把窗口移出屏幕，只留一个"可见框"（宽 30%×窗口、高 52%×窗口）在屏幕边上；
+     *   2) 用 translationX/Y 在窗口内平移视频内容，使可见框正好落在角色的头/上半身
+     *      （画布 x[36%..66%]、y[5%..57%]），身体其余部分被裁掉 → 只露头；
+     *   3) 再按 ±12° 旋转，呈"斜着探出头往里看"的角度（贴左缘朝右、贴右缘朝左）。
+     * 可见框纵向贴屏幕底部（否则无法只保留上半身）。
+     * 期间引擎强制 idleOnly（只播待机动画）并禁止移动。
      */
     private fun enterPeek(toLeft: Boolean) {
         if (peeking) return
@@ -902,11 +930,23 @@ open class PetOverlayService : Service() {
         engine.cancelMove()
         engine.idleOnly = true
         engine.humActive = false
-        val (sw, _) = screenPx()
+        val (sw, sh) = screenPx()
         val ww = engine.winW
-        val peekW = (ww * peekVisibleFrac).toInt()
-        val x = if (toLeft) -(ww - peekW) else sw - peekW
-        val y = engine.winY.coerceIn(windowYRange())
+        val wh = engine.winH
+        val visW = (ww * PEEK_VIS_W).toInt()
+        val visH = (wh * PEEK_VIS_H).toInt()
+        // 可见框位置：贴左缘露右侧一段 / 贴右缘露左侧一段，纵向贴屏幕底部
+        val x = if (toLeft) -(ww - visW) else sw - visW
+        val y = (sh - visH).coerceAtLeast(0)
+        // 平移视频内容，让可见框对应画布 [PEEK_VIEW_X0 .. +visW] × [PEEK_VIEW_Y0 .. +visH]
+        videoView.translationX = if (toLeft) ww * (1f - PEEK_VIS_W - PEEK_VIEW_X0) else -(ww * PEEK_VIEW_X0)
+        videoView.translationY = -(wh * PEEK_VIEW_Y0)
+        // 斜角：绕"可见框中心"旋转（贴左缘头朝屏内右倾、贴右缘朝左倾）
+        videoView.pivotX = ww * (PEEK_VIEW_X0 + PEEK_VIS_W / 2f)
+        videoView.pivotY = wh * (PEEK_VIEW_Y0 + PEEK_VIS_H / 2f)
+        peekPivotX = videoView.pivotX
+        peekPivotY = videoView.pivotY
+        videoView.rotation = if (toLeft) PEEK_TILT else -PEEK_TILT
         moveWindowUnclamped(x, y)
         // 探头方向：贴左缘朝右看、贴右缘朝左看（面对屏内）
         engine.setFacing(if (toLeft) "right" else "left")
@@ -924,6 +964,12 @@ open class PetOverlayService : Service() {
         peeking = false
         engine.idleOnly = false
         engine.noMove = curNoMove
+        // 复位探头期间施加的内容平移/旋转
+        videoView.translationX = 0f
+        videoView.translationY = 0f
+        videoView.rotation = 0f
+        peekPivotX = -1f
+        peekPivotY = -1f
         if (restorePosition) {
             val xr = windowXRange(); val yr = windowYRange()
             val rx = peekRestoreX.takeIf { it >= 0 }?.coerceIn(xr.first, xr.last)
@@ -955,6 +1001,7 @@ open class PetOverlayService : Service() {
             it.w = engine.winW; it.h = engine.winH
         }
         engine.syncPosition(xPx, yPx)
+        bubble?.follow()
     }
 
     // ================================================================ 移动窗口
@@ -972,6 +1019,8 @@ open class PetOverlayService : Service() {
             it.w = engine.winW; it.h = engine.winH
         }
         engine.syncPosition(cx, cy)
+        // 气泡跟随桌宠（自言自语气泡锚定在桌宠上/下方，必须一起移动）
+        bubble?.follow()
     }
 
     private fun tickPhysics() {
@@ -1191,13 +1240,6 @@ open class PetOverlayService : Service() {
         MainActivity.start(this)
     }
 
-    /** 欧鲸鲸彩蛋：由服务统一持有，退出时统一清理（并限制同时存在数量） */
-    fun spawnEasterEgg() {
-        val popup = EasterEggPopup.showRandom(this) ?: return
-        easterEggs.add(popup)
-        while (easterEggs.size > 8) easterEggs.removeAt(0).dismiss()
-    }
-
     // 悬浮 AI 对话窗口（长按菜单入口）
     private var chatWindow: PetChatWindow? = null
 
@@ -1285,7 +1327,16 @@ open class PetOverlayService : Service() {
     }
 
     fun quit() {
-        // 仅退出本实例（其它小肥鱼不受影响）
+        // 仅退出本实例（其它小肥鱼不受影响）。
+        // 先同步关掉所有子窗口：即便 onDestroy 被延迟/异常，也不会留下
+        // 悬浮窗残留（残留的可聚焦/触碰窗口会让整屏触摸失效）。
+        runCatching {
+            removeMenu()
+            bubble?.dismiss()
+            stopQuickChat()
+            dismissChat()
+            stopIsland()
+        }
         stopSelf()
     }
 
@@ -1320,7 +1371,8 @@ open class PetOverlayService : Service() {
         val p = musicPlayer()
         p.index = config.musicIndex()
         p.setVolume(config.musicVolume() / 100f)
-        p.ensureLoaded()
+        // 只扫描曲目列表；播放器等到用户点播放/切歌时才创建
+        p.reload()
         engine.humTune = HUMMING_ANIM.takeIf { n -> engine.hasAnim(n) }
         syncAnimLocks()
     }
@@ -1347,23 +1399,24 @@ open class PetOverlayService : Service() {
     }
 
     // ---- 长按菜单音乐控制（左右键切歌 / 播放暂停 / 指定曲目）----
+    // 全部包一层 runCatching：音乐是附加功能，任何异常都不得带崩桌宠进程
     fun musicToggle() {
-        musicPlayer().apply { ensureLoaded(); toggle() }
+        runCatching { musicPlayer().toggle() }.onFailure { AppLog.log("MUSIC", "播放/暂停失败: ${it.message}") }
         syncAnimLocks()
     }
 
     fun musicNext() {
-        musicPlayer().apply { ensureLoaded(); next() }
+        runCatching { musicPlayer().next() }.onFailure { AppLog.log("MUSIC", "下一首失败: ${it.message}") }
         syncAnimLocks()
     }
 
     fun musicPrev() {
-        musicPlayer().apply { ensureLoaded(); prev() }
+        runCatching { musicPlayer().prev() }.onFailure { AppLog.log("MUSIC", "上一首失败: ${it.message}") }
         syncAnimLocks()
     }
 
     fun musicPlayAt(i: Int) {
-        musicPlayer().apply { ensureLoaded(); playAt(i) }
+        runCatching { musicPlayer().playAt(i) }.onFailure { AppLog.log("MUSIC", "选曲失败: ${it.message}") }
         syncAnimLocks()
     }
 

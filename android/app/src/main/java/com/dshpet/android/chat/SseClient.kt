@@ -43,9 +43,7 @@ object SseClient {
         return base + path
     }
 
-    /**
-     * 流式请求。onDelta 在主线程回调；返回的 Job 可 cancel()。
-     */
+    /** 流式请求。onDelta 在主线程回调；返回的 Job 可 cancel()。 */
     fun stream(
         cfg: ChatCfg,
         messages: List<Msg>,
@@ -54,7 +52,8 @@ object SseClient {
         onDone: () -> Unit,
     ): Job {
         val cancelled = AtomicBoolean(false)
-        return kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+        val respRef = java.util.concurrent.atomic.AtomicReference<okhttp3.Response?>(null)
+        val job = kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
             try {
                 val endpoint = normalizeEndpoint(cfg.baseUrl, cfg.chatPath)
                 val payload = JSONObject().apply {
@@ -76,13 +75,16 @@ object SseClient {
                     }
                     .build()
                 val resp = client.newCall(req).execute()
+                respRef.set(resp)
                 if (!resp.isSuccessful) {
                     val detail = resp.body?.string().orEmpty()
                     val code = resp.code
                     val msg = safeErrorDetail(detail)
-                    withContext(Dispatchers.Main) {
-                        onError(if (code in setOf(401, 403)) "认证失败（HTTP $code）：$msg"
-                        else "请求失败（HTTP $code）：$msg")
+                    if (!cancelled.get()) {
+                        withContext(Dispatchers.Main) {
+                            onError(if (code in setOf(401, 403)) "认证失败（HTTP $code）：$msg"
+                            else "请求失败（HTTP $code）：$msg")
+                        }
                     }
                     return@launch
                 }
@@ -99,12 +101,13 @@ object SseClient {
                     }
                     if (parser.done) break
                 }
-                withContext(Dispatchers.Main) { onDone() }
-                runCatching { resp.close() }
+                if (!cancelled.get()) withContext(Dispatchers.Main) { onDone() }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 用户点了"停止"/窗口关闭：正常取消，不当作错误上报
                 throw e
             } catch (e: Exception) {
+                // 取消时主动 close() 会让阻塞读抛 IOException：不当成错误上报
+                if (cancelled.get()) return@launch
                 val msg = when (e) {
                     is javax.net.ssl.SSLException, is java.security.cert.CertificateException ->
                         "TLS 证书校验失败：${e.message}；可在 AI 设置中勾选\"跳过 SSL 证书验证\"后重试"
@@ -112,8 +115,18 @@ object SseClient {
                     else -> "网络请求失败：${e.message}"
                 }
                 withContext(Dispatchers.Main) { onError(msg) }
+            } finally {
+                // 无论正常结束/出错/被取消都必须关闭连接，否则每次"停止"都漏一条连接
+                runCatching { respRef.get()?.close() }
+                respRef.set(null)
             }
         }
+        // 取消时置位标志并关闭连接：让阻塞中的 readUtf8Line 立即返回，"停止"即时生效
+        job.invokeOnCompletion {
+            cancelled.set(true)
+            runCatching { respRef.get()?.close() }
+        }
+        return job
     }
 
     /** 连接测试（移植 test_connection）：最小非流式请求 */

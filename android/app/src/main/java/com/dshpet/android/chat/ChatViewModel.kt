@@ -12,8 +12,12 @@ import kotlinx.coroutines.launch
 
 /**
  * 聊天界面状态管理：会话列表、当前会话、流式输出。
+ *
+ * 进程级**共享单例**（[shared]）：全屏对话界面、悬浮对话窗、快捷对话气泡共用同一个
+ * 实例，因此"当前会话 / 流式输出 / 会话列表"三处实时一致——否则每个窗口各持一份
+ * 内存副本，全量写盘会互相覆盖，表现为消息丢失或两边看到的内容不一样。
  */
-class ChatViewModel(app: Application) : AndroidViewModel(app) {
+class ChatViewModel private constructor(app: Application) : AndroidViewModel(app) {
 
     private val repo = ChatRepo(app)
     private val config = PetConfig.get(app)
@@ -46,8 +50,13 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun refresh() {
         viewModelScope.launch {
             _sessions.value = repo.list()
+            // 顺带从磁盘重读当前会话：其它窗口（悬浮窗/快捷气泡）追加的消息立即可见
+            _current.value?.id?.let { id -> repo.get(id)?.let { _current.value = it } }
         }
     }
+
+    /** 界面回到前台时同步一次磁盘内容（多窗口/多界面共用同一份会话） */
+    fun reloadCurrent() = refresh()
 
     private suspend fun ensureSession() {
         if (_current.value == null) {
@@ -89,21 +98,30 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         return if (st.isNotEmpty()) base + ChatRepo.Message("assistant", st) else base
     }
 
-    fun send(text: String) {
-        val session = _current.value ?: return
+    /**
+     * 发送消息。返回 false 表示未受理（内容为空 / 正在等回复），调用方据此决定
+     * 是否清空输入框——避免发送被拒时把用户已输入的内容丢掉。
+     */
+    fun send(text: String): Boolean {
         val trimmed = text.trim()
-        if (trimmed.isEmpty() || _busy.value) return
-        if (!_busy.compareAndSet(expect = false, update = true)) return
+        if (trimmed.isEmpty() || _busy.value) return false
+        if (!_busy.compareAndSet(expect = false, update = true)) return false
         _streaming.value = true
         _streamText.value = ""
         val token = ++streamToken
         viewModelScope.launch {
-            if (session.messages.none { it.role == "user" }) {
-                repo.rename(session.id, repo.deriveTitle(trimmed))
+            // 会话可能尚未从磁盘恢复（窗口刚打开就发送）→ 这里补一次
+            val session = _current.value ?: (repo.list().firstOrNull() ?: repo.create()).also {
+                _current.value = it
             }
-            val userMsg = ChatRepo.Message("user", trimmed)
-            session.messages.add(userMsg)
-            repo.save(session)
+            val id = session.id
+            if (session.messages.none { it.role == "user" }) {
+                repo.rename(id, repo.deriveTitle(trimmed))
+            }
+            // 追加写（读-改-写）：不吃掉其它窗口写入的消息
+            repo.appendMessage(id, ChatRepo.Message("user", trimmed))
+            val fresh = repo.get(id) ?: session
+            _current.value = fresh
             refresh()
 
             val cfg = SseClient.ChatCfg(
@@ -116,7 +134,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 timeoutSec = config.chatTimeout(),
                 verifySsl = config.chatVerifySsl(),
             )
-            val history = session.messages.takeLast(20).map { SseClient.Msg(it.role, it.content) }
+            val history = fresh.messages.takeLast(20).map { SseClient.Msg(it.role, it.content) }
             // 结束（正常 onDone / 出错 onError）都必须复位 streaming/busy，
             // 否则一次失败后界面永久停在"思考中…"且无法再发送。
             var finished = false
@@ -124,11 +142,14 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (finished || token != streamToken) return
                 finished = true
                 val full = _streamText.value
-                if (full.isNotBlank()) session.messages.add(ChatRepo.Message("assistant", full))
-                repoSave(session)
                 _streamText.value = ""
                 _streaming.value = false
                 _busy.value = false
+                viewModelScope.launch {
+                    if (full.isNotBlank()) repo.appendMessage(id, ChatRepo.Message("assistant", full))
+                    repo.get(id)?.let { _current.value = it }
+                    refresh()
+                }
             }
             streamJob = SseClient.stream(
                 cfg = cfg,
@@ -145,6 +166,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 onDone = { finish() },
             )
         }
+        return true
     }
 
     fun stopStream() {
@@ -153,19 +175,34 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         streamJob = null
         _streaming.value = false
         _busy.value = false
-        val s = _current.value
-        if (s != null) {
-            val full = _streamText.value
-            if (full.isNotBlank()) s.messages.add(ChatRepo.Message("assistant", full))
-            repoSave(s)
-        }
+        val id = _current.value?.id
+        val full = _streamText.value
         _streamText.value = ""
+        if (id != null) {
+            viewModelScope.launch {
+                if (full.isNotBlank()) repo.appendMessage(id, ChatRepo.Message("assistant", full))
+                repo.get(id)?.let { _current.value = it }
+                refresh()
+            }
+        }
     }
 
-    private fun repoSave(session: ChatRepo.Session) {
-        viewModelScope.launch {
-            repo.save(session)
-            refresh()
-        }
+    override fun onCleared() {
+        // 流式任务挂在独立作用域，必须显式取消，否则界面关掉后仍会继续消耗请求
+        streamToken++
+        streamJob?.cancel()
+        streamJob = null
+        super.onCleared()
+    }
+
+    companion object {
+        @Volatile
+        private var shared: ChatViewModel? = null
+
+        /** 进程级共享实例（全屏对话 / 悬浮对话 / 快捷气泡共用） */
+        fun shared(app: Application): ChatViewModel =
+            shared ?: synchronized(this) {
+                shared ?: ChatViewModel(app).also { shared = it }
+            }
     }
 }

@@ -79,7 +79,7 @@ class PetChatWindow(private val ctx: Context) {
     private val wm = ctx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
     private var view: ComposeView? = null
     private var lp: WindowManager.LayoutParams? = null
-    private val vm: ChatViewModel = ChatViewModel(ctx.applicationContext as Application)
+    private val vm: ChatViewModel = ChatViewModel.shared(ctx.applicationContext as Application)
     private val config = PetConfig.get(ctx)
 
     fun show() {
@@ -263,8 +263,11 @@ class PetChatWindow(private val ctx: Context) {
         val streamText by vm.streamText.collectAsState()
         val messages = remember(current, streamText) { vm.displayedMessages() }
         val listState = rememberLazyListState()
-        LaunchedEffect(messages.size) {
-            if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+        LaunchedEffect(messages.size, streamText.length) {
+            if (messages.isEmpty()) return@LaunchedEffect
+            val last = messages.size - 1
+            if (streamText.isNotEmpty()) listState.scrollToItem(last)
+            else listState.animateScrollToItem(last)
         }
         Box(modifier) {
             LazyColumn(
@@ -355,10 +358,7 @@ class PetChatWindow(private val ctx: Context) {
             IconButton(
                 onClick = {
                     if (streaming) vm.stopStream()
-                    else if (input.isNotBlank()) {
-                        vm.send(input)
-                        input = ""
-                    }
+                    else if (input.isNotBlank() && vm.send(input)) input = ""
                 },
                 modifier = Modifier
                     .clip(RoundedCornerShape(20.dp))

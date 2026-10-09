@@ -61,6 +61,9 @@ class SpeechBubble(
     private var view: View? = null
     private var params: WindowManager.LayoutParams? = null
     private var hideRunnable: Runnable? = null
+    /** 上次定位时的桌宠位置（避免每帧 measure/updateViewLayout） */
+    private var lastPetX = Int.MIN_VALUE
+    private var lastPetY = Int.MIN_VALUE
     /**
      * 由服务侧更新的配置缓存（服务在协程里读取 DataStore 后写入）。
      * 用 Compose 状态承载：内容/样式变化直接触发重组，
@@ -127,18 +130,39 @@ class SpeechBubble(
         hideRunnable?.let { handler.removeCallbacks(it) }
         view?.let { runCatching { wm.removeView(it) } }
         view = null
+        lastPetX = Int.MIN_VALUE
+        lastPetY = Int.MIN_VALUE
+    }
+
+    /**
+     * 桌宠移动时跟随：气泡始终锚定在桌宠正上方/正下方。
+     * 由服务在每次 moveWindow/moveWindowUnclamped 后调用。
+     */
+    fun follow() {
+        val v = view ?: return
+        if (v.visibility != View.VISIBLE) return
+        if (engine.winX == lastPetX && engine.winY == lastPetY) return
+        reposition()
     }
 
     /** 锚定：气泡底边中心 = 桌宠顶边中心（全物理像素） */
     private fun reposition() {
         val v = view ?: return
         val lp = params ?: return
-        v.measure(
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-        )
-        val bw = v.measuredWidth
-        val bh = v.measuredHeight
+        lastPetX = engine.winX
+        lastPetY = engine.winY
+        // 窗口是 WRAP_CONTENT：内容变化后 WindowManager 会自行重新测量。
+        // 优先用已布局尺寸，避免跟随桌宠时每帧主动 measure（拖动开销敏感）。
+        var bw = v.width
+        var bh = v.height
+        if (bw <= 0 || bh <= 0) {
+            v.measure(
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            )
+            bw = v.measuredWidth
+            bh = v.measuredHeight
+        }
         val (sw, sh) = screenPx()
         val petCenterX = engine.winX + engine.winW / 2
         var x = petCenterX - bw / 2

@@ -42,6 +42,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,7 +57,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.dshpet.android.data.PetConfig
 import com.dshpet.android.ui.theme.DshPetTheme
 import com.dshpet.android.util.mdBlur
@@ -69,11 +69,22 @@ import kotlinx.coroutines.launch
 class ChatActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val app = application
         setContent {
-            val vm: ChatViewModel = viewModel()
+            // 进程级共享实例：与悬浮对话窗/快捷气泡实时一致
+            val vm: ChatViewModel = remember { ChatViewModel.shared(app) }
             val cfg = PetConfig.get(applicationContext)
             val blurCfg by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
             val blur = blurCfg && android.os.Build.VERSION.SDK_INT >= 31
+            // 回到前台时从磁盘同步一次（悬浮窗可能刚追加过消息）
+            val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val obs = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                    if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) vm.reloadCurrent()
+                }
+                lifecycleOwner.lifecycle.addObserver(obs)
+                onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+            }
             DshPetTheme {
                 ChatScreen(vm, blur)
             }
@@ -95,8 +106,13 @@ private fun ChatScreen(vm: ChatViewModel, blur: Boolean) {
     val scope = rememberCoroutineScope()
     val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // 新消息滚到底；流式增量按长度触发（只数字变化不会触发滚动）
+    LaunchedEffect(messages.size, streamText.length) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val last = messages.size - 1
+        // 流式过程中直接定位（不 animate，避免每个增量都排队动画）
+        if (streamText.isNotEmpty()) listState.scrollToItem(last)
+        else listState.animateScrollToItem(last)
     }
 
     ModalNavigationDrawer(
@@ -198,8 +214,8 @@ private fun ChatScreen(vm: ChatViewModel, blur: Boolean) {
                         onInput = { input = it },
                         streaming = streaming,
                         onSend = {
-                            vm.send(input)
-                            input = ""
+                            // 只在真正受理时清空，避免发送被拒时丢掉已输入内容
+                            if (vm.send(input)) input = ""
                         },
                         onStop = { vm.stopStream() },
                     )
