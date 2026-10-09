@@ -70,6 +70,8 @@ open class PetOverlayService : Service() {
         /** 可见框对应的画布起点：角色内容约占 x[33%..67%]、头/上半身约 y[16%..57%] */
         const val PEEK_VIEW_X0 = 0.36f
         const val PEEK_VIEW_Y0 = 0.05f
+        /** 角色头部中心在画布上的纵向位置（用于探头时保持高度不跳变） */
+        const val PEEK_HEAD_CY = 0.31f
         /** 探头斜角（度）：贴左缘头朝屏内右倾，贴右缘朝左倾 */
         const val PEEK_TILT = 12f
 
@@ -620,10 +622,11 @@ open class PetOverlayService : Service() {
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
         videoView = PetVideoView(this)
-        root.addView(videoView, android.widget.FrameLayout.LayoutParams(
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-        ))
+        // 显式给视频子视图固定尺寸（= 正常窗口尺寸，与 MATCH_PARENT 等效）。
+        // 探头时窗口会缩小成一个"可见框"，此时子视图保持原尺寸 → 被父容器裁剪，
+        // 于是能在不缩放的情况下只露出画面的一角（见 enterPeek）。
+        root.addView(videoView, android.widget.FrameLayout.LayoutParams(w, h))
+        root.clipChildren = true
         AppLog.log("SVC", "buildWindow ${w}x$h 纯代码创建视图")
         videoView.setListener(object : PetVideoView.Listener {
             override fun onVideoEnded(name: String) {
@@ -907,26 +910,25 @@ open class PetOverlayService : Service() {
     }
 
     /**
-     * 进入探头状态：只让**头部**从屏幕边缘探进来。
+     * 进入探头状态：**只从屏幕左/右缘探出头**，位置不下坠。
      *
-     * 关键点：素材画布（640×360）里角色内容只占中间一条（x≈33%..67%），
-     * 若单纯把窗口移出屏幕，露出的往往是空白边距（旧版"开启后像消失"的根因）。
-     * 所以这里同时做两件事：
-     *   1) 把窗口移出屏幕，只留一个"可见框"（宽 30%×窗口、高 52%×窗口）在屏幕边上；
-     *   2) 用 translationX/Y 在窗口内平移视频内容，使可见框正好落在角色的头/上半身
-     *      （画布 x[36%..66%]、y[5%..57%]），身体其余部分被裁掉 → 只露头；
-     *   3) 再按 ±12° 旋转，呈"斜着探出头往里看"的角度（贴左缘朝右、贴右缘朝左）。
-     * 可见框纵向贴屏幕底部（否则无法只保留上半身）。
-     * 期间引擎强制 idleOnly（只播待机动画）并禁止移动。
+     * 做法：把宠物窗口本身缩成一个"可见框"（宽 30%×窗口、高 52%×窗口）贴到屏幕左/右缘，
+     * 视频子视图仍是原窗口尺寸，被容器裁剪；再用 translationX/Y 在框内平移画面，
+     * 使框里正好是角色的头/上半身（画布 x[36%..66%]、y[5%..57%]）；最后 ±12° 旋转
+     * 呈斜角。纵向位置沿用桌宠当前高度（框内画面的头与原来应在的位置对齐，不跳变）。
+     * 期间引擎强制 idleOnly（只播待机动画）、禁止移动、并临时忽略碰撞推挤。
      */
     private fun enterPeek(toLeft: Boolean) {
         if (peeking) return
+        val lp = params ?: return
+        val c = container ?: return
         peeking = true
         peekRestoreX = engine.winX
         peekRestoreY = engine.winY
         peekRestoreFacing = engine.facing
-        // 探头期间不接受抛掷物理（否则物理 ticker 会把窗口挪出贴边位置）
+        // 探头期间不接受抛掷物理 / 碰撞推挤（否则会把窗口挪出贴边位置）
         physMode = null
+        collisionMember?.infiniteMass = true
         engine.cancelMove()
         engine.idleOnly = true
         engine.humActive = false
@@ -935,19 +937,28 @@ open class PetOverlayService : Service() {
         val wh = engine.winH
         val visW = (ww * PEEK_VIS_W).toInt()
         val visH = (wh * PEEK_VIS_H).toInt()
-        // 可见框位置：贴左缘露右侧一段 / 贴右缘露左侧一段，纵向贴屏幕底部
-        val x = if (toLeft) -(ww - visW) else sw - visW
-        val y = (sh - visH).coerceAtLeast(0)
-        // 平移视频内容，让可见框对应画布 [PEEK_VIEW_X0 .. +visW] × [PEEK_VIEW_Y0 .. +visH]
-        videoView.translationX = if (toLeft) ww * (1f - PEEK_VIS_W - PEEK_VIEW_X0) else -(ww * PEEK_VIEW_X0)
+        // 可见框：贴左缘 / 贴右缘，纵向让"头"落在原位（框内头的位置 = 原头位置）
+        val x = if (toLeft) 0 else (sw - visW).coerceAtLeast(0)
+        val y = (peekRestoreY + ((PEEK_HEAD_CY - PEEK_VIEW_Y0 - PEEK_VIS_H / 2f) * wh)).toInt()
+            .coerceIn(0, (sh - visH).coerceAtLeast(0))
+        // 框内平移画面：露出画布 [PEEK_VIEW_X0 .. +visW] × [PEEK_VIEW_Y0 .. +visH]
+        val bandX0 = if (toLeft) PEEK_VIEW_X0 else (1f - PEEK_VIEW_X0 - PEEK_VIS_W)
+        videoView.translationX = -(ww * bandX0)
         videoView.translationY = -(wh * PEEK_VIEW_Y0)
         // 斜角：绕"可见框中心"旋转（贴左缘头朝屏内右倾、贴右缘朝左倾）
-        videoView.pivotX = ww * (PEEK_VIEW_X0 + PEEK_VIS_W / 2f)
+        videoView.pivotX = ww * (bandX0 + PEEK_VIS_W / 2f)
         videoView.pivotY = wh * (PEEK_VIEW_Y0 + PEEK_VIS_H / 2f)
         peekPivotX = videoView.pivotX
         peekPivotY = videoView.pivotY
         videoView.rotation = if (toLeft) PEEK_TILT else -PEEK_TILT
-        moveWindowUnclamped(x, y)
+        // 窗口缩成可见框并移动（不改 engine.winW/H：那是桌宠的几何基准）
+        lp.width = visW
+        lp.height = visH
+        lp.x = x
+        lp.y = y
+        runCatching { wm.updateViewLayout(c, lp) }
+        collisionMember?.let { it.x = x.toDouble(); it.y = y.toDouble(); it.w = visW; it.h = visH }
+        engine.syncPosition(x, y)
         // 探头方向：贴左缘朝右看、贴右缘朝左看（面对屏内）
         engine.setFacing(if (toLeft) "right" else "left")
         videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
@@ -964,44 +975,47 @@ open class PetOverlayService : Service() {
         peeking = false
         engine.idleOnly = false
         engine.noMove = curNoMove
-        // 复位探头期间施加的内容平移/旋转
+        collisionMember?.infiniteMass = false
+        // 复位探头期间施加的内容平移/旋转，并把窗口恢复成完整尺寸
         videoView.translationX = 0f
         videoView.translationY = 0f
         videoView.rotation = 0f
         peekPivotX = -1f
         peekPivotY = -1f
+        val lp = params
+        val c = container
+        if (lp != null && c != null) {
+            lp.width = engine.winW
+            lp.height = engine.winH
+        }
         if (restorePosition) {
             val xr = windowXRange(); val yr = windowYRange()
             val rx = peekRestoreX.takeIf { it >= 0 }?.coerceIn(xr.first, xr.last)
             val ry = peekRestoreY.takeIf { it >= 0 }?.coerceIn(yr.first, yr.last)
-            if (rx != null && ry != null) moveWindowUnclamped(rx, ry)
+            if (rx != null && ry != null && lp != null && c != null) {
+                lp.x = rx
+                lp.y = ry
+                runCatching { wm.updateViewLayout(c, lp) }
+                collisionMember?.let { it.x = rx.toDouble(); it.y = ry.toDouble() }
+                engine.syncPosition(rx, ry)
+            }
             engine.setFacing(peekRestoreFacing)
         } else {
             // 保持当前（贴边）位置，但收敛到正常可拖动范围，避免拖动第一帧跳变
-            moveWindowUnclamped(
-                engine.winX.coerceIn(windowXRange()),
-                engine.winY.coerceIn(windowYRange()),
-            )
+            val nx = engine.winX.coerceIn(windowXRange())
+            val ny = engine.winY.coerceIn(windowYRange())
+            if (lp != null && c != null) {
+                lp.x = nx
+                lp.y = ny
+                runCatching { wm.updateViewLayout(c, lp) }
+            }
+            engine.syncPosition(nx, ny)
         }
+        collisionMember?.let { it.w = engine.winW; it.h = engine.winH }
         videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
         engine.switchToIdle()
         savePosition()
         syncAnimLocks()
-    }
-
-    /** 不理会窗口 clamp 直接定位（探头状态允许窗口越出屏幕） */
-    private fun moveWindowUnclamped(xPx: Int, yPx: Int) {
-        val lp = params ?: return
-        val c = container ?: return
-        lp.x = xPx
-        lp.y = yPx
-        runCatching { wm.updateViewLayout(c, lp) }
-        collisionMember?.let {
-            it.x = xPx.toDouble(); it.y = yPx.toDouble()
-            it.w = engine.winW; it.h = engine.winH
-        }
-        engine.syncPosition(xPx, yPx)
-        bubble?.follow()
     }
 
     // ================================================================ 移动窗口
@@ -1079,6 +1093,8 @@ open class PetOverlayService : Service() {
         val c = config
         watch(c.flowDouble("scale", 0.72)) { v ->
             curScale = (v as Double)
+            // 探头中窗口被缩成可见框：此时改尺寸会把探头框撑破，等退出后再套用
+            if (peeking) return@watch
             // 缩放变化：重建窗口尺寸，保留脚底位置
             val oldW = engine.winW
             val (ww, wh) = windowSizePx()

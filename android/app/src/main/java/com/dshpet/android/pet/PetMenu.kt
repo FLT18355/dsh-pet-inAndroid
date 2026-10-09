@@ -405,15 +405,17 @@ class PetMenu(
     }
 
     // ================================================================ 音乐（长按菜单）
-    /** 订阅播放器状态：菜单打开期间实时刷新当前曲目 */
+    /** 订阅播放器状态：菜单打开期间实时刷新当前曲目（取不到播放器时降级显示） */
     @Composable
     private fun rememberMusicState(): PetMusicPlayer.State {
-        val player = remember { service.musicPlayer() }
-        var st by remember { mutableStateOf(player.state()) }
+        val player = remember { runCatching { service.musicPlayer() }.getOrNull() }
+        var st by remember {
+            mutableStateOf(player?.state() ?: PetMusicPlayer.State(false, false, "（音乐不可用）", 0, 0))
+        }
         DisposableEffect(player) {
             val l: (PetMusicPlayer.State) -> Unit = { st = it }
-            player.addListener(l)
-            onDispose { player.removeListener(l) }
+            if (player != null) player.addListener(l)
+            onDispose { if (player != null) player.removeListener(l) }
         }
         return st
     }
@@ -476,11 +478,17 @@ class PetMenu(
         onBack: () -> Unit,
         runKeep: (suspend () -> Unit) -> Unit,
     ) {
-        val player = remember { service.musicPlayer() }
+        val player = remember { runCatching { service.musicPlayer() }.getOrNull() }
         val st = rememberMusicState()
-        var names by remember { mutableStateOf(player.trackNames()) }
+        var names by remember { mutableStateOf(runCatching { player?.trackNames().orEmpty() }.getOrDefault(emptyList())) }
         // 上传/删除音乐后（total 变化）重新读取列表
-        androidx.compose.runtime.LaunchedEffect(st.total) { names = player.trackNames() }
+        androidx.compose.runtime.LaunchedEffect(st.total) {
+            names = runCatching { player?.trackNames().orEmpty() }.getOrDefault(emptyList())
+        }
+        // 面板本身不再套 verticalScroll：外层菜单已是纵向滚动容器，
+        // 同方向嵌套滚动曾在个别机型上把菜单窗口测出异常高度而崩溃。
+        // 列表只展示前 [MAX_MUSIC_ROWS] 首，其余用一行提示（完整列表在设置页）。
+        val shown = names.take(MAX_MUSIC_ROWS)
         Surface(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(16.dp),
@@ -491,7 +499,6 @@ class PetMenu(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
@@ -531,7 +538,7 @@ class PetMenu(
                     )
                 } else {
                     MenuGroup("播放列表（点击播放）")
-                    names.forEachIndexed { i, name ->
+                    shown.forEachIndexed { i, name ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -555,6 +562,14 @@ class PetMenu(
                                 )
                             }
                         }
+                    }
+                    if (names.size > shown.size) {
+                        Text(
+                            "…还有 ${names.size - shown.size} 首（在 设置 → 桌宠 → 音乐 查看全部）",
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+                        )
                     }
                 }
                 Text(
@@ -789,3 +804,6 @@ class PetMenu(
         else -> "${"%.0f".format(scale * 640)}dp"
     }
 }
+
+/** 长按菜单音乐面板最多列出的曲目数（完整列表在设置页；避免菜单窗口过高） */
+private const val MAX_MUSIC_ROWS = 12
