@@ -63,17 +63,11 @@ open class PetOverlayService : Service() {
         /** 音乐播放时桌宠固定播放的动画名（素材缺失则回退正常动画链） */
         const val HUMMING_ANIM = "悠闲哼歌"
 
-        // ---- 边缘探头"只露头"可见框 ----
-        /** 可见框尺寸（占窗口比例）：宽 30%、高 52% */
-        const val PEEK_VIS_W = 0.30f
-        const val PEEK_VIS_H = 0.52f
-        /** 可见框对应的画布起点：角色内容约占 x[33%..67%]、头/上半身约 y[16%..57%] */
-        const val PEEK_VIEW_X0 = 0.36f
-        const val PEEK_VIEW_Y0 = 0.05f
-        /** 角色头部中心在画布上的纵向位置（用于探头时保持高度不跳变） */
-        const val PEEK_HEAD_CY = 0.31f
+        // ---- 边缘探头 ----
+        /** 露出宽度（占窗口比例）：一半 */
+        const val PEEK_VIS_W = 0.50f
         /** 探头斜角（度）：贴左缘头朝屏内右倾，贴右缘朝左倾 */
-        const val PEEK_TILT = 12f
+        const val PEEK_TILT = 45f
 
         /** 进程级多开上限缓存（设置可调；0 = 无限制；PetApp 启动时同步） */
         @Volatile
@@ -910,13 +904,13 @@ open class PetOverlayService : Service() {
     }
 
     /**
-     * 进入探头状态：**只从屏幕左/右缘探出头**，位置不下坠。
+     * 进入探头状态：宠物贴在屏幕左/右缘，只露出**左半 / 右半**身体，并呈 ±45° 斜角
+     * （贴左缘头朝屏内右倾、贴右缘朝左倾），像从屏幕边探头张望。
      *
-     * 做法：把宠物窗口本身缩成一个"可见框"（宽 30%×窗口、高 52%×窗口）贴到屏幕左/右缘，
-     * 视频子视图仍是原窗口尺寸，被容器裁剪；再用 translationX/Y 在框内平移画面，
-     * 使框里正好是角色的头/上半身（画布 x[36%..66%]、y[5%..57%]）；最后 ±12° 旋转
-     * 呈斜角。纵向位置沿用桌宠当前高度（框内画面的头与原来应在的位置对齐，不跳变）。
-     * 期间引擎强制 idleOnly（只播待机动画）、禁止移动、并临时忽略碰撞推挤。
+     * 实现就是最初那版"窗口移出屏幕、露出 50% 宽度"的做法，额外把画面绕窗口中心
+     * 旋转 ±45°：旋转会把头带进屏内、把下半身转出屏幕，观感更自然。
+     * 纵向保持桌宠当前高度（不下坠）；期间引擎强制 idleOnly（只播待机动画）、
+     * 禁止自动移动，并临时忽略碰撞推挤。
      */
     private fun enterPeek(toLeft: Boolean) {
         if (peeking) return
@@ -932,32 +926,24 @@ open class PetOverlayService : Service() {
         engine.cancelMove()
         engine.idleOnly = true
         engine.humActive = false
-        val (sw, sh) = screenPx()
+        val (sw, _) = screenPx()
         val ww = engine.winW
         val wh = engine.winH
-        val visW = (ww * PEEK_VIS_W).toInt()
-        val visH = (wh * PEEK_VIS_H).toInt()
-        // 可见框：贴左缘 / 贴右缘，纵向让"头"落在原位（框内头的位置 = 原头位置）
-        val x = if (toLeft) 0 else (sw - visW).coerceAtLeast(0)
-        val y = (peekRestoreY + ((PEEK_HEAD_CY - PEEK_VIEW_Y0 - PEEK_VIS_H / 2f) * wh)).toInt()
-            .coerceIn(0, (sh - visH).coerceAtLeast(0))
-        // 框内平移画面：露出画布 [PEEK_VIEW_X0 .. +visW] × [PEEK_VIEW_Y0 .. +visH]
-        val bandX0 = if (toLeft) PEEK_VIEW_X0 else (1f - PEEK_VIEW_X0 - PEEK_VIS_W)
-        videoView.translationX = -(ww * bandX0)
-        videoView.translationY = -(wh * PEEK_VIEW_Y0)
-        // 斜角：绕"可见框中心"旋转（贴左缘头朝屏内右倾、贴右缘朝左倾）
-        videoView.pivotX = ww * (bandX0 + PEEK_VIS_W / 2f)
-        videoView.pivotY = wh * (PEEK_VIEW_Y0 + PEEK_VIS_H / 2f)
+        val visW = (ww * PEEK_VIS_W).toInt()   // 露出宽度 = 窗口一半
+        val x = if (toLeft) -(ww - visW) else sw - visW
+        val y = engine.winY.coerceIn(windowYRange())
+        // 45° 探头姿态：绕窗口中心旋转（内容无需平移）
+        videoView.translationX = 0f
+        videoView.translationY = 0f
+        videoView.pivotX = ww / 2f
+        videoView.pivotY = wh / 2f
         peekPivotX = videoView.pivotX
         peekPivotY = videoView.pivotY
         videoView.rotation = if (toLeft) PEEK_TILT else -PEEK_TILT
-        // 窗口缩成可见框并移动（不改 engine.winW/H：那是桌宠的几何基准）
-        lp.width = visW
-        lp.height = visH
         lp.x = x
         lp.y = y
         runCatching { wm.updateViewLayout(c, lp) }
-        collisionMember?.let { it.x = x.toDouble(); it.y = y.toDouble(); it.w = visW; it.h = visH }
+        collisionMember?.let { it.x = x.toDouble(); it.y = y.toDouble(); it.w = ww; it.h = wh }
         engine.syncPosition(x, y)
         // 探头方向：贴左缘朝右看、贴右缘朝左看（面对屏内）
         engine.setFacing(if (toLeft) "right" else "left")
@@ -976,7 +962,7 @@ open class PetOverlayService : Service() {
         engine.idleOnly = false
         engine.noMove = curNoMove
         collisionMember?.infiniteMass = false
-        // 复位探头期间施加的内容平移/旋转，并把窗口恢复成完整尺寸
+        // 复位探头期间的旋转
         videoView.translationX = 0f
         videoView.translationY = 0f
         videoView.rotation = 0f
@@ -985,6 +971,7 @@ open class PetOverlayService : Service() {
         val lp = params
         val c = container
         if (lp != null && c != null) {
+            // 保险：把窗口尺寸恢复成完整尺寸（本版探头不改尺寸）
             lp.width = engine.winW
             lp.height = engine.winH
         }
@@ -1011,7 +998,6 @@ open class PetOverlayService : Service() {
             }
             engine.syncPosition(nx, ny)
         }
-        collisionMember?.let { it.w = engine.winW; it.h = engine.winH }
         videoView.setMirror(engine.shouldMirror(engine.anim ?: ""))
         engine.switchToIdle()
         savePosition()

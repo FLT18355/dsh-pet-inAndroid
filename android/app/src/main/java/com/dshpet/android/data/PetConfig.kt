@@ -121,6 +121,7 @@ class PetConfig(private val ctx: Context) {
         private val K_CHAT_MAX_TOKENS = intPreferencesKey("chat_max_tokens")
         private val K_CHAT_TIMEOUT = intPreferencesKey("chat_timeout")
         private val K_CHAT_VERIFY_SSL = booleanPreferencesKey("chat_verify_ssl")
+        private val K_CHAT_SYSTEM_PROMPT = stringPreferencesKey("chat_system_prompt")   // 自定义系统提示词（人设）
         private val K_BALANCE_REFRESH_MIN = intPreferencesKey("balance_refresh_minutes")
 
         // ---- 快捷启动 ----
@@ -130,6 +131,10 @@ class PetConfig(private val ctx: Context) {
         private val K_INSTANCE_COUNT = intPreferencesKey("spawned_instance_count")
 
         const val DEFAULT_CHARACTER = "shenshen"
+        /** 默认系统提示词（人设）：设置页可改可清空，清空后不发送 system 消息 */
+        const val DEFAULT_CHAT_SYSTEM_PROMPT =
+            "你是「欧鲸鲸」，一只常年陪在主人身边的小肥鱼桌宠，自称小肥鱼。说话温和、口语化、简短，" +
+                    "一般不超过三句话；不说教、不长篇大论、不输出 Markdown 表格与代码块，除非主人明确要求。"
         const val DEFAULT_SELF_TALK_TEXT =
             "好女孩……好模型……欧鲸鲸……今天也要认真工作呀。再陪你一会儿。"
     }
@@ -180,6 +185,7 @@ class PetConfig(private val ctx: Context) {
     suspend fun chatMaxTokens() = read(K_CHAT_MAX_TOKENS, 2048)
     suspend fun chatTimeout() = read(K_CHAT_TIMEOUT, 60)
     suspend fun chatVerifySsl() = read(K_CHAT_VERIFY_SSL, true)
+    suspend fun chatSystemPrompt() = read(K_CHAT_SYSTEM_PROMPT, DEFAULT_CHAT_SYSTEM_PROMPT)
     suspend fun balanceRefreshMinutes() = read(K_BALANCE_REFRESH_MIN, 0)
 
     suspend fun quickLaunch(): List<Pair<String, String>> =
@@ -285,6 +291,8 @@ class PetConfig(private val ctx: Context) {
     suspend fun setChatMaxTokens(v: Int) = set("chat_max_tokens", v)
     suspend fun setChatTimeout(v: Int) = set("chat_timeout", v)
     suspend fun setChatVerifySsl(v: Boolean) = set("chat_verify_ssl", v)
+    /** 系统提示词：限制长度，避免误粘贴超长文本（2000 字） */
+    suspend fun setChatSystemPrompt(v: String) = set("chat_system_prompt", v.take(2000))
     suspend fun setBalanceRefreshMinutes(v: Int) = set("balance_refresh_minutes", v)
     suspend fun setQuickLaunch(v: Set<String>) = set("quick_launch_apps", v)
 

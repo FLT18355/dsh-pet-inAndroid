@@ -1112,6 +1112,53 @@ private fun AiTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlinx.c
                 scope.launch { cfg.setChatVerifySsl(!on) }
             }
         }
+        Section("系统提示词（自定义人设）") {
+            val savedPrompt by cfg
+                .flowString("chat_system_prompt", PetConfig.DEFAULT_CHAT_SYSTEM_PROMPT)
+                .collectAsState(initial = PetConfig.DEFAULT_CHAT_SYSTEM_PROMPT)
+            var promptLocal by remember { mutableStateOf(savedPrompt) }
+            var promptTip by remember { mutableStateOf(false) }
+            // 仅在外部修改过、且本地未同步时载入一次（编辑中不打断输入）
+            LaunchedEffect(savedPrompt) {
+                if (savedPrompt != promptLocal) promptLocal = savedPrompt
+            }
+            LaunchedEffect(promptTip) {
+                if (promptTip) {
+                    kotlinx.coroutines.delay(2000)
+                    promptTip = false
+                }
+            }
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                Text(
+                    "每次对话都会把它作为 system 消息发在最前面（全屏对话 / 悬浮对话窗 / 快捷气泡共用）。留空则不发送。",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = promptLocal,
+                        onValueChange = { promptLocal = it },
+                        placeholder = { Text("例如：你是桌宠欧鲸鲸，回答要简短温和…", fontSize = 12.sp) },
+                        minLines = 3,
+                        maxLines = 8,
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Button(onClick = {
+                            scope.launch { cfg.setChatSystemPrompt(promptLocal) }
+                            promptTip = true
+                        }) { Text(if (promptTip) "已保存" else "保存") }
+                        TextButton(onClick = {
+                            promptLocal = PetConfig.DEFAULT_CHAT_SYSTEM_PROMPT
+                            scope.launch { cfg.setChatSystemPrompt(promptLocal) }
+                        }) { Text("恢复默认") }
+                    }
+                }
+            }
+        }
         Section("工具") {
             Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedButton(onClick = {

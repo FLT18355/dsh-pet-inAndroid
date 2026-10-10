@@ -134,7 +134,12 @@ class ChatViewModel private constructor(app: Application) : AndroidViewModel(app
                 timeoutSec = config.chatTimeout(),
                 verifySsl = config.chatVerifySsl(),
             )
-            val history = fresh.messages.takeLast(20).map { SseClient.Msg(it.role, it.content) }
+            val history = buildList {
+                // 自定义系统提示词（人设）：留空则不发 system 消息
+                val sys = config.chatSystemPrompt().trim()
+                if (sys.isNotEmpty()) add(SseClient.Msg("system", sys))
+                addAll(fresh.messages.takeLast(20).map { SseClient.Msg(it.role, it.content) })
+            }
             // 结束（正常 onDone / 出错 onError）都必须复位 streaming/busy，
             // 否则一次失败后界面永久停在"思考中…"且无法再发送。
             var finished = false
