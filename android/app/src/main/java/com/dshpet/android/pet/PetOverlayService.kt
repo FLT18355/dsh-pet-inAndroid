@@ -68,6 +68,8 @@ open class PetOverlayService : Service() {
         const val PEEK_VIS_W = 0.50f
         /** 探头斜角（度）：贴左缘头朝屏内右倾，贴右缘朝左倾 */
         const val PEEK_TILT = 45f
+        /** 角色头部中心在画布上的纵向位置（用于补偿旋转带来的高度位移） */
+        const val PEEK_HEAD_CY = 0.31f
 
         /** 进程级多开上限缓存（设置可调；0 = 无限制；PetApp 启动时同步） */
         @Volatile
@@ -616,10 +618,11 @@ open class PetOverlayService : Service() {
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
         }
         videoView = PetVideoView(this)
-        // 显式给视频子视图固定尺寸（= 正常窗口尺寸，与 MATCH_PARENT 等效）。
-        // 探头时窗口会缩小成一个"可见框"，此时子视图保持原尺寸 → 被父容器裁剪，
-        // 于是能在不缩放的情况下只露出画面的一角（见 enterPeek）。
-        root.addView(videoView, android.widget.FrameLayout.LayoutParams(w, h))
+        // MATCH_PARENT：子视图始终跟随窗口尺寸（缩放改尺寸时不会与窗口脱节）
+        root.addView(videoView, android.widget.FrameLayout.LayoutParams(
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+        ))
         root.clipChildren = true
         AppLog.log("SVC", "buildWindow ${w}x$h 纯代码创建视图")
         videoView.setListener(object : PetVideoView.Listener {
@@ -850,14 +853,8 @@ open class PetOverlayService : Service() {
 
     private fun squash() {
         squashAnim?.cancel()
-        // 探头中：Q 弹必须绕探头旋转支点，否则会把斜角支点改到底边中心
-        if (peeking && peekPivotX >= 0f) {
-            videoView.pivotX = peekPivotX
-            videoView.pivotY = peekPivotY
-        } else {
-            videoView.pivotX = videoView.width / 2f
-            videoView.pivotY = videoView.height.toFloat()
-        }
+        videoView.pivotX = videoView.width / 2f
+        videoView.pivotY = videoView.height.toFloat()
         val anim = android.animation.ValueAnimator.ofFloat(1f, 0.78f, 1.06f, 1f).apply {
             duration = 240
             addUpdateListener {
@@ -875,9 +872,6 @@ open class PetOverlayService : Service() {
     private var peekRestoreX = -1
     private var peekRestoreY = -1
     private var peekRestoreFacing = "left"
-    /** 探头期间的旋转支点（点击 Q 弹会重设 pivot，需要复位回探头支点） */
-    private var peekPivotX = -1f
-    private var peekPivotY = -1f
 
     /**
      * 边缘探头开关（用户设置）：开启后不再立即吸附，只有把桌宠**拖到屏幕左/右边缘**
@@ -905,12 +899,13 @@ open class PetOverlayService : Service() {
 
     /**
      * 进入探头状态：宠物贴在屏幕左/右缘，只露出**左半 / 右半**身体，并呈 ±45° 斜角
-     * （贴左缘头朝屏内右倾、贴右缘朝左倾），像从屏幕边探头张望。
+     * （贴左缘头朝屏内右倾、贴右缘朝左倾），像从屏幕边斜着探头张望。
      *
-     * 实现就是最初那版"窗口移出屏幕、露出 50% 宽度"的做法，额外把画面绕窗口中心
-     * 旋转 ±45°：旋转会把头带进屏内、把下半身转出屏幕，观感更自然。
-     * 纵向保持桌宠当前高度（不下坠）；期间引擎强制 idleOnly（只播待机动画）、
-     * 禁止自动移动，并临时忽略碰撞推挤。
+     * 位置就是最初那版"窗口移出屏幕、露出 50% 宽度"的做法（纵向保持桌宠当前高度，
+     * 不下坠）；旋转**由 GL 着色器完成**（[PetVideoView.setRotationDegrees]）——
+     * 本视图是 zOrderOnTop 的独立 Surface 层，View.rotation 不生效还会造成拉伸，
+     * 不能用。旋转绕窗口中心（≈角色身体中心），因此剪切线是斜的、头自然进屏内。
+     * 期间引擎强制 idleOnly（只播待机动画）、禁止自动移动，并临时忽略碰撞推挤。
      */
     private fun enterPeek(toLeft: Boolean) {
         if (peeking) return
@@ -930,16 +925,15 @@ open class PetOverlayService : Service() {
         val ww = engine.winW
         val wh = engine.winH
         val visW = (ww * PEEK_VIS_W).toInt()   // 露出宽度 = 窗口一半
+        val tilt = if (toLeft) PEEK_TILT else -PEEK_TILT
+        // 画面旋转由着色器完成（独立 Surface 层不支持 View.rotation）。
+        // 旋转绕窗口中心（= 角色身体中心），并补偿头部的纵向位移，避免高度跳变。
+        videoView.setRotationDegrees(tilt)
+        val rad = Math.toRadians(tilt.toDouble())
+        val headDy = (PEEK_HEAD_CY - 0.5f) * wh      // 头部相对窗口中心的 y 偏移（负=在上方）
+        val dyShift = (headDy * Math.cos(rad) - headDy).toFloat()
         val x = if (toLeft) -(ww - visW) else sw - visW
-        val y = engine.winY.coerceIn(windowYRange())
-        // 45° 探头姿态：绕窗口中心旋转（内容无需平移）
-        videoView.translationX = 0f
-        videoView.translationY = 0f
-        videoView.pivotX = ww / 2f
-        videoView.pivotY = wh / 2f
-        peekPivotX = videoView.pivotX
-        peekPivotY = videoView.pivotY
-        videoView.rotation = if (toLeft) PEEK_TILT else -PEEK_TILT
+        val y = (engine.winY - dyShift.toInt()).coerceIn(windowYRange())
         lp.x = x
         lp.y = y
         runCatching { wm.updateViewLayout(c, lp) }
@@ -962,12 +956,8 @@ open class PetOverlayService : Service() {
         engine.idleOnly = false
         engine.noMove = curNoMove
         collisionMember?.infiniteMass = false
-        // 复位探头期间的旋转
-        videoView.translationX = 0f
-        videoView.translationY = 0f
-        videoView.rotation = 0f
-        peekPivotX = -1f
-        peekPivotY = -1f
+        // 复位探头期间的画面旋转（着色器 uniform，0 度 = 原样）
+        videoView.setRotationDegrees(0f)
         val lp = params
         val c = container
         if (lp != null && c != null) {

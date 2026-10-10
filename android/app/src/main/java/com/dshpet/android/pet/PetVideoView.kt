@@ -58,7 +58,19 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     private var uTexLoc = 0
     private var uMirrorLoc = 0
     private var uMLoc = 0
+    private var uCosLoc = 0
+    private var uSinLoc = 0
+    private var uHalfLoc = 0
     private var mirror = false
+    /**
+     * 画面旋转角（度，顺时针）。**不用 View.rotation**：本视图是
+     * `setZOrderOnTop(true)` 的 GLSurfaceView（独立 Surface 层），View 的
+     * rotation/scale 变换在独立 surface 上不会被正确应用（表现为"没转"甚至被拉长）。
+     * 所以在顶点着色器里按像素空间旋转四边形（见 VERTEX_SHADER）。
+     */
+    @Volatile private var rotDeg = 0f
+    @Volatile private var rotCos = 1f
+    @Volatile private var rotSin = 0f
     private val stMatrix = FloatArray(16)
 
     private var ready = false
@@ -124,6 +136,9 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
             uMLoc = GLES20.glGetUniformLocation(program, "uM")
+            uCosLoc = GLES20.glGetUniformLocation(program, "uCos")
+            uSinLoc = GLES20.glGetUniformLocation(program, "uSin")
+            uHalfLoc = GLES20.glGetUniformLocation(program, "uHalf")
 
             val st = SurfaceTexture(textureId)
             st.setOnFrameAvailableListener { requestRender() }
@@ -192,6 +207,12 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glUniform1i(uTexLoc, 0)
             GLES20.glUniform1f(uMirrorLoc, if (mirror) 1f else 0f)
             GLES20.glUniformMatrix4fv(uMLoc, 1, false, stMatrix, 0)
+            // 像素空间的等比旋转（视口半宽/半高）：uCos/uSin = 1/0 时即原样不旋转
+            GLES20.glUniform1f(uCosLoc, rotCos)
+            GLES20.glUniform1f(uSinLoc, rotSin)
+            val hw = width / 2f
+            val hh = height / 2f
+            GLES20.glUniform2f(uHalfLoc, if (hw > 0f) hw else 1f, if (hh > 0f) hh else 1f)
 
             GLES20.glEnableVertexAttribArray(0)
             GLES20.glVertexAttribPointer(0, 2, GLES20.GL_FLOAT, false, 0, QUAD)
@@ -250,6 +271,19 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     fun setMirror(m: Boolean) {
         if (mirror == m) return
         mirror = m
+        requestRender()
+    }
+
+    /**
+     * 画面旋转（度，顺时针）。着色器实现 → 独立 Surface 层也能真正旋转且不拉伸。
+     * 0 度 = 原样。
+     */
+    fun setRotationDegrees(deg: Float) {
+        if (rotDeg == deg) return
+        rotDeg = deg
+        val rad = Math.toRadians(deg.toDouble())
+        rotCos = Math.cos(rad).toFloat()
+        rotSin = Math.sin(rad).toFloat()
         requestRender()
     }
 
@@ -340,13 +374,22 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         // SurfaceTexture 输出必须绑定 GL_TEXTURE_EXTERNAL_OES 并用
         // samplerExternalOES 采样（绑定成 GL_TEXTURE_2D 会采到空纹理 → 全黑）。
         // uM 为 SurfaceTexture.getTransformMatrix() 的 UV 变换（含 Y 翻转）。
+        //
+        // 旋转：顶点位置先换算到"像素空间"（乘视口半宽/半高）、旋转、再换回裁剪空间。
+        // 直接在裁剪空间旋转会导致非等比拉伸（视口不是正方形）；uHalf 就是用来做
+        // 等比校正的。UV 仍取未旋转的 aPos，因此贴图跟着四边形一起转。
         private const val VERTEX_SHADER = """
             attribute vec2 aPos;
             uniform mat4 uM;
+            uniform float uCos;
+            uniform float uSin;
+            uniform vec2 uHalf;
             varying vec2 vUV;
             void main() {
                 vUV = (uM * vec4(aPos * 0.5 + 0.5, 0.0, 1.0)).xy;
-                gl_Position = vec4(aPos, 0.0, 1.0);
+                vec2 p = aPos * uHalf;
+                vec2 r = vec2(p.x * uCos - p.y * uSin, p.x * uSin + p.y * uCos);
+                gl_Position = vec4(r / uHalf, 0.0, 1.0);
             }
         """
 
