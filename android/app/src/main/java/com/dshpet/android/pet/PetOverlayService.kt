@@ -66,7 +66,8 @@ open class PetOverlayService : Service() {
         // ---- 边缘探头 ----
         /** 露出宽度（占窗口比例）：一半 */
         const val PEEK_VIS_W = 0.50f
-        /** 探头斜角（度）：贴左缘头朝屏内右倾，贴右缘朝左倾 */
+        /** 探头斜角（度）：正值在屏幕上是逆时针（头往左倒）。
+         *  进入探头时左缘用 -PEEK_TILT（头朝屏内右倾）、右缘用 +PEEK_TILT（头朝左倾）。 */
         const val PEEK_TILT = 45f
         /** 角色头部中心在画布上的纵向位置（用于补偿旋转带来的高度位移） */
         const val PEEK_HEAD_CY = 0.31f
@@ -925,7 +926,10 @@ open class PetOverlayService : Service() {
         val ww = engine.winW
         val wh = engine.winH
         val visW = (ww * PEEK_VIS_W).toInt()   // 露出宽度 = 窗口一半
-        val tilt = if (toLeft) PEEK_TILT else -PEEK_TILT
+        // 方向：贴左缘要"头朝屏内（右）"、贴右缘"头朝左"。
+        // 注意着色器在裁剪空间旋转，而裁剪空间 y 轴朝上、与 View 坐标相反 ——
+        // 正角度在屏幕上看是逆时针（头往左倒），所以这里左缘用**负角**。
+        val tilt = if (toLeft) -PEEK_TILT else PEEK_TILT
         // 画面旋转由着色器完成（独立 Surface 层不支持 View.rotation）。
         // 旋转绕窗口中心（= 角色身体中心），并补偿头部的纵向位移，避免高度跳变。
         videoView.setRotationDegrees(tilt)
