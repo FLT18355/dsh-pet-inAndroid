@@ -61,7 +61,6 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     private var uCosLoc = 0
     private var uSinLoc = 0
     private var uSqXLoc = 0
-    private var uSqYLoc = 0
     private var uFitLoc = 0
     private var uHalfLoc = 0
     private var mirror = false
@@ -125,6 +124,13 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         private fun onSurfaceCreatedInternal() {
             GLES20.glClearColor(0f, 0f, 0f, 0f)
             program = createProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+            if (program == 0) {
+                // 兜底：变形着色器编译/链接失败时退回"无旋转/无 Q 弹"的极简着色器，
+                // 保证桌宠还能正常显示（历史问题：着色器失败 = 桌宠整块不显示）。
+                com.dshpet.android.util.AppLog.log("GL", "变形着色器不可用，回退到基础着色器")
+                program = createProgram(VERTEX_SHADER_PLAIN, FRAGMENT_SHADER)
+            }
+            com.dshpet.android.util.AppLog.log("GL", "着色器程序 program=$program")
             uTexLoc = GLES20.glGetUniformLocation(program, "uTex")
             uMirrorLoc = GLES20.glGetUniformLocation(program, "uMirror")
             com.dshpet.android.util.AppLog.log(
@@ -144,10 +150,7 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             uMLoc = GLES20.glGetUniformLocation(program, "uM")
             uCosLoc = GLES20.glGetUniformLocation(program, "uCos")
             uSinLoc = GLES20.glGetUniformLocation(program, "uSin")
-            uSqXLoc = GLES20.glGetUniformLocation(program, "uSquash[0]").let {
-                if (it >= 0) it else GLES20.glGetUniformLocation(program, "uSquash")
-            }
-            uSqYLoc = if (uSqXLoc >= 0) uSqXLoc + 1 else -1
+            uSqXLoc = GLES20.glGetUniformLocation(program, "uSquash")
             uFitLoc = GLES20.glGetUniformLocation(program, "uFit")
             uHalfLoc = GLES20.glGetUniformLocation(program, "uHalf")
 
@@ -203,6 +206,11 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
                 return
             }
+            if (program == 0) {
+                // 两种着色器都失败：清屏结束本帧（不调用 glUseProgram(0) 之后的一系列调用）
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                return
+            }
             try {
                 st.updateTexImage()
             } catch (e: Exception) {
@@ -221,8 +229,7 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             // 像素空间的等比旋转（视口半宽/半高）：uCos/uSin = 1/0 时即原样不旋转
             GLES20.glUniform1f(uCosLoc, rotCos)
             GLES20.glUniform1f(uSinLoc, rotSin)
-            GLES20.glUniform1f(uSqXLoc, sqX)
-            GLES20.glUniform1f(uSqYLoc, sqY)
+            GLES20.glUniform2f(uSqXLoc, sqX, sqY)
             GLES20.glUniform1f(uFitLoc, rotationFit(width.toFloat(), height.toFloat(), rotDeg))
             val hw = width / 2f
             val hh = height / 2f
@@ -439,13 +446,24 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             void main() {
                 vUV = (uM * vec4(aPos * 0.5 + 0.5, 0.0, 1.0)).xy;
                 vec2 p = aPos * uHalf;
-                // uFit：旋转后等比缩小，保证"角色内容盒"仍完整落在窗口内
                 vec2 r = vec2(p.x * uCos - p.y * uSin, p.x * uSin + p.y * uCos) * uFit;
-                // Q 弹挤压：绕"脚底中心"（像素空间 (0, -halfH)）缩放，形变时脚不离地。
-                // uSquash = (1,1) 即原样，不影响正常动画。
                 vec2 pivot = vec2(0.0, -uHalf.y);
                 vec2 s = pivot + (r - pivot) * uSquash;
                 gl_Position = vec4(s / uHalf, 0.0, 1.0);
+            }
+        """
+        // 说明（不能写进 GLSL：个别驱动的 GLSL 编译器拒绝注释里的非 ASCII 字符，
+        // 一旦编译失败 program=0 → 桌宠整块不显示）：
+        //  · uFit   = 旋转后按"角色内容盒"等比缩小，避免 16:9 窗口斜切画面
+        //  · uSquash= Q 弹挤压，绕像素空间"脚底中心"(0,-halfH) 缩放，(1,1)=原样
+
+        private const val VERTEX_SHADER_PLAIN = """
+            attribute vec2 aPos;
+            uniform mat4 uM;
+            varying vec2 vUV;
+            void main() {
+                vUV = (uM * vec4(aPos * 0.5 + 0.5, 0.0, 1.0)).xy;
+                gl_Position = vec4(aPos, 0.0, 1.0);
             }
         """
 
@@ -466,6 +484,10 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         private fun createProgram(vertex: String, fragment: String): Int {
             val vs = compile(GLES20.GL_VERTEX_SHADER, vertex)
             val fs = compile(GLES20.GL_FRAGMENT_SHADER, fragment)
+            if (vs == 0 || fs == 0) {
+                Log.e("PetVideoView", "着色器编译失败（vs=$vs fs=$fs）")
+                return 0
+            }
             val p = GLES20.glCreateProgram()
             GLES20.glAttachShader(p, vs)
             GLES20.glAttachShader(p, fs)
@@ -476,6 +498,8 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, status, 0)
             if (status[0] == 0) {
                 Log.e("PetVideoView", "link error: " + GLES20.glGetProgramInfoLog(p))
+                GLES20.glDeleteProgram(p)
+                return 0
             }
             return p
         }
@@ -488,6 +512,8 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glGetShaderiv(sh, GLES20.GL_COMPILE_STATUS, status, 0)
             if (status[0] == 0) {
                 Log.e("PetVideoView", "compile error: " + GLES20.glGetShaderInfoLog(sh))
+                GLES20.glDeleteShader(sh)
+                return 0
             }
             return sh
         }

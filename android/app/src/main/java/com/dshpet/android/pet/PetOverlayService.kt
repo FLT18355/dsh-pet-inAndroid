@@ -217,7 +217,12 @@ open class PetOverlayService : Service() {
     private val moveTicker = object : Runnable {
         override fun run() {
             tickerPosted = false
-            if (screenOff) return   // 熄屏：完全停摆（亮屏时 onScreenOn 重新挂上）
+            // 熄屏自愈：只依赖广播时一旦漏收 SCREEN_ON，就会永久停在"假熄屏"
+            // （表现：桌宠整块不显示）。这里每秒自查一次真实屏幕状态，亮屏立刻恢复。
+            if (screenOff) {
+                if (isScreenInteractive()) onScreenOn() else postTicker(screenCheckMs, allowScreenOff = true)
+                return
+            }
             var active = false
             // 动画间隔到点必须解除 gap 状态：否则一次动作/移动后
             // 引擎会永远停在待机/转向链（tickGap 原先无人调用）。
@@ -231,8 +236,16 @@ open class PetOverlayService : Service() {
         }
     }
 
-    private fun postTicker(delayMs: Long) {
-        if (tickerPosted || screenOff) return
+    /** 熄屏期间的自查间隔（仅用来纠正误判的熄屏状态，开销可忽略） */
+    private val screenCheckMs = 1000L
+
+    private fun isScreenInteractive(): Boolean = runCatching {
+        (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
+
+    private fun postTicker(delayMs: Long, allowScreenOff: Boolean = false) {
+        if (tickerPosted) return
+        if (screenOff && !allowScreenOff) return
         tickerPosted = true
         uiHandler.postDelayed(moveTicker, delayMs)
     }
@@ -271,6 +284,8 @@ open class PetOverlayService : Service() {
             runCatching { videoView.setSquash(1f, 1f) }
             runCatching { videoView.pausePlay() }
         }
+        // 保留每秒一次的自查：万一漏收 SCREEN_ON，下一拍就自愈（否则桌宠永久不显示）
+        postTicker(screenCheckMs, allowScreenOff = true)
         AppLog.log("SVC", "熄屏：暂停桌宠动画与定时任务（省电）")
     }
 
@@ -498,12 +513,11 @@ open class PetOverlayService : Service() {
         // 启动动画链
         // 实例可能是在熄屏状态下被拉起来的（开机自启/通知）：先同步一次屏幕状态，
         // 否则 ticker 与解码会在熄屏时白跑（亮屏时 onScreenOn 会恢复）。
-        screenOff = runCatching {
-            !(getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
-        }.getOrDefault(false)
+        screenOff = !isScreenInteractive()
         engine.start()
         if (screenOff) videoView.pausePlay()
-        postTicker(activeTickMs)
+        // 熄屏启动时也要挂上"自查"拍子，否则会一直停在假熄屏
+        postTicker(if (screenOff) screenCheckMs else activeTickMs, allowScreenOff = true)
 
         // Agent 联动插件总线（上游统一事件协议；默认关，设置开启）
         if (config.agentLinkEnabled()) startAgentBus()
@@ -1416,6 +1430,12 @@ open class PetOverlayService : Service() {
         // 先同步关掉所有子窗口：即便 onDestroy 被延迟/异常，也不会留下
         // 悬浮窗残留（残留的可聚焦/触碰窗口会让整屏触摸失效）。
         runCatching {
+            // 先停掉动画与挤压动画，让解码器停止出帧，再拆窗口/释放 GL —— 这一步能
+            // 显著缩小"解码器仍在向 Surface 出帧时拆窗口"的原生竞态窗口
+            //（历史现象：点退出后整机输入卡死一阵）。
+            squashAnim?.cancel()
+            if (this::videoView.isInitialized) runCatching { videoView.pausePlay() }
+            uiHandler.removeCallbacksAndMessages(null)
             removeMenu()
             bubble?.dismiss()
             stopQuickChat()
