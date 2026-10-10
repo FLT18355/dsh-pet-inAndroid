@@ -35,6 +35,9 @@ object CollisionHub {
         @Volatile var infiniteMass: Boolean = false,  // 拖拽/锁定中
         @Volatile var active: Boolean = true,
     ) {
+        /** 上一 tick 的位置：静止时据此跳过整个 tick（避免 33ms 的 O(n²) 空转） */
+        @Volatile var lastTickX: Double = x
+        @Volatile var lastTickY: Double = y
         val radiusX: Double get() = w * 0.32   // 鱼身内容约占窗口 65% 宽
         val radiusY: Double get() = h * 0.40
         val mass: Double
@@ -45,6 +48,8 @@ object CollisionHub {
     }
 
     private const val TICK_MS = 33L
+    /** 空闲退避：所有成员静止时不再每 33ms 唤醒（有运动/被 wake 时立刻回到 TICK_MS） */
+    private const val IDLE_TICK_MS = 200L
     private const val RESTITUTION = 0.82
     private const val FRICTION = 0.08
     private const val IMPULSE_CAP = 9000.0
@@ -76,13 +81,41 @@ object CollisionHub {
                 ticking = false
                 return
             }
+            inTick = true
+            var work = false
             try {
-                tick()
+                work = tick()
             } catch (e: Throwable) {
                 AppLog.log("COLLISION", "tick 异常: ${e.message}")
             }
-            handler.postDelayed(this, TICK_MS)
+            inTick = false
+            // tick 期间若被 wake（结算写回窗口 → moveWindow → wake），
+            // 不重复排队，直接立刻再跑一帧，避免同一帧出现两个 tick 实例。
+            if (pendingWake) {
+                pendingWake = false
+                handler.post(this)
+            } else {
+                handler.postDelayed(this, if (work) TICK_MS else IDLE_TICK_MS)
+            }
         }
+    }
+
+    /** tick 执行中（结算会回调 moveWindow → wake，需要防重入） */
+    private var inTick = false
+    private var pendingWake = false
+
+    /** 有成员被移动（拖动/散步/抛掷）时立刻唤醒结算，避免空闲退避带来的判定延迟 */
+    fun wake() {
+        if (!ticking) {
+            ensureTicking()
+            return
+        }
+        if (inTick) {
+            pendingWake = true
+            return
+        }
+        handler.removeCallbacks(ticker)
+        handler.post(ticker)
     }
 
     @Synchronized
@@ -113,6 +146,24 @@ object CollisionHub {
     /** @return true=发生有效碰撞 */
     private fun tick(): Boolean {
         if (!enabled) return false
+        // 全部成员都没动（静止且无速度）：直接跳过 —— 多开静止时不再每 33ms
+        // 做一次 O(n²) 检测并分配列表（这是纯耗电的空转）。拖拽/抛掷会改坐标或速度，
+        // 因此一旦有运动就会重新进入下面的结算。
+        var moving = false
+        for (m in members.values) {
+            if (!m.active) continue
+            if (abs(m.vx) > 1.0 || abs(m.vy) > 1.0 ||
+                abs(m.x - m.lastTickX) > 0.5 || abs(m.y - m.lastTickY) > 0.5
+            ) {
+                moving = true
+                break
+            }
+        }
+        if (!moving) return false
+        for (m in members.values) {
+            m.lastTickX = m.x
+            m.lastTickY = m.y
+        }
         val list = synchronized(members) { members.values.filter { it.active } }
         var collided = false
         var maxImpact = 0.0
@@ -134,7 +185,8 @@ object CollisionHub {
             val cbs = synchronized(movedCallbacks) { movedCallbacks.toMap() }
             list.forEach { m -> cbs[m.id]?.invoke(m) }
         }
-        return collided
+        // 走到这里说明确实有成员在动（见上面的提前返回）：有运动就保持 33ms 高频结算
+        return true
     }
 
     /**

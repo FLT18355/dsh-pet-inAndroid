@@ -11,6 +11,7 @@ import android.view.View
 import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.clickable
@@ -216,7 +217,9 @@ class PetMenu(
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                    // 标题栏：整条可拖动窗口，右侧直接关闭
+                    // 标题栏：宠物头像 + 名称（设置里可改）+ 右侧关闭；整条可拖动窗口
+                    val petName by cfg.flowString("pet_name", PetConfig.DEFAULT_PET_NAME)
+                        .collectAsState(initial = PetConfig.DEFAULT_PET_NAME)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -226,23 +229,50 @@ class PetMenu(
                                     onWindowDrag(dragAmount.x, dragAmount.y)
                                 }
                             }
-                            .padding(start = 12.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+                            .padding(start = 10.dp, end = 2.dp, top = 6.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(
-                            Icons.Filled.Menu, contentDescription = "拖动",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.width(18.dp),
-                        )
-                        Text(
-                            "小肥鱼",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        // 头像：主色渐变圆 + 小鱼
+                        Box(
+                            modifier = Modifier
+                                .width(26.dp)
+                                .height(26.dp)
+                                .background(
+                                    androidx.compose.ui.graphics.Brush.linearGradient(
+                                        listOf(
+                                            MaterialTheme.colorScheme.primary,
+                                            MaterialTheme.colorScheme.tertiary,
+                                        )
+                                    ),
+                                    androidx.compose.foundation.shape.CircleShape,
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Filled.Favorite, contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.width(14.dp),
+                            )
+                        }
+                        Column(
                             modifier = Modifier
                                 .weight(1f)
-                                .padding(start = 6.dp),
-                        )
+                                .padding(start = 8.dp),
+                        ) {
+                            Text(
+                                petName,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                            )
+                            Text(
+                                "长按菜单 · 可拖动",
+                                fontSize = 9.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
                         IconButton(onClick = { dismiss() }, modifier = Modifier.height(28.dp)) {
                             Icon(
                                 Icons.Filled.Close, contentDescription = "关闭",
@@ -251,6 +281,7 @@ class PetMenu(
                             )
                         }
                     }
+                    HorizontalDivider(Modifier.padding(horizontal = 12.dp))
                     if (funcOpen) {
                         FuncPanel(cfg, blurOn, onBack = { funcOpen = false }, run, runKeep)
                     } else if (musicOpen) {
@@ -281,15 +312,16 @@ class PetMenu(
                         MenuItem(Icons.Filled.List, "音乐列表") { musicOpen = true }
                         // ---- 功能（展开功能页）----
                         MenuGroup("功能")
+                        // 功能页入口：徽标直接显示已开启的开关，省得逐项点进去看
+                        val fnBadge = listOfNotNull(
+                            if (service.curEdgePeek) "探头" else null,
+                            if (service.curPowerSave) "省电" else null,
+                            if (service.curPhysics) "物理" else null,
+                        ).joinToString("/")
                         MenuItem(
-                            Icons.Filled.Search,
-                            "边缘探头",
-                            badge = if (service.curEdgePeek) "开" else null,
-                        ) { funcOpen = true }
-                        MenuItem(
-                            Icons.Filled.Star,
+                            Icons.Filled.Build,
                             "更多功能",
-                            badge = "▸",
+                            badge = fnBadge.ifEmpty { "▸" },
                         ) { funcOpen = true }
                         // ---- 工具 ----
                         MenuGroup("工具")
@@ -322,6 +354,8 @@ class PetMenu(
         var mouseThrough by remember { mutableStateOf(service.curMouseThrough) }
         var physics by remember { mutableStateOf(service.curPhysics) }
         var soundChoice by remember { mutableStateOf(service.curClickSoundChoice) }
+        var powerSave by remember { mutableStateOf(service.curPowerSave) }
+        var squash by remember { mutableStateOf(service.curClickSquash) }
         Surface(
             modifier = Modifier
                 .fillMaxWidth(),
@@ -362,8 +396,8 @@ class PetMenu(
                     )
                 }
                 HorizontalDivider(Modifier.padding(horizontal = 14.dp))
-                // ---- 新功能 ----
-                MenuGroup("新功能")
+                // ---- 探头 ----
+                MenuGroup("边缘探头")
                 ToggleItem(Icons.Filled.Search, "边缘探头", edgePeek, sub = "拖到屏幕左右边缘自动贴边探头") {
                     edgePeek = !edgePeek
                     runKeep { cfg.setEdgePeek(edgePeek) }
@@ -377,6 +411,19 @@ class PetMenu(
                 ChoiceItem("鸭子音效", soundChoice == "duck") {
                     soundChoice = "duck"
                     runKeep { cfg.setClickSoundChoice("duck") }
+                }
+                ToggleItem(Icons.Filled.Star, "点击 Q 弹", squash, sub = "点击时挤压回弹（GL 着色器）") {
+                    squash = !squash
+                    runKeep { cfg.setClickSquash(squash) }
+                }
+                // ---- 省电 ----
+                MenuGroup("省电")
+                ToggleItem(
+                    Icons.Filled.Build, "省电模式", powerSave,
+                    sub = "停自动散步/自言自语/碰撞；熄屏后彻底停摆",
+                ) {
+                    powerSave = !powerSave
+                    runKeep { cfg.setPowerSave(powerSave) }
                 }
                 // ---- 原功能分类项 ----
                 MenuGroup("功能")
@@ -399,7 +446,6 @@ class PetMenu(
                     }
                 }
                 MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
-                MenuItem(Icons.Filled.Star, "灵动岛") { run { service.toggleIsland() } }
             }
         }
     }
@@ -615,8 +661,10 @@ class PetMenu(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 1.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onClick)
-                .padding(horizontal = 14.dp, vertical = 7.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
@@ -650,8 +698,10 @@ class PetMenu(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 1.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onToggle)
-                .padding(horizontal = 14.dp, vertical = 4.dp),
+                .padding(horizontal = 10.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(18.dp))
@@ -673,8 +723,10 @@ class PetMenu(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .padding(horizontal = 6.dp, vertical = 1.dp)
+                .clip(RoundedCornerShape(10.dp))
                 .clickable(onClick = onPick)
-                .padding(start = 26.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+                .padding(start = 30.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(

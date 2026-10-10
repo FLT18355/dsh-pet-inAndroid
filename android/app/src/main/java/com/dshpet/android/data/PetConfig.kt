@@ -73,12 +73,9 @@ class PetConfig(private val ctx: Context) {
         private val K_MAX_INSTANCES = intPreferencesKey("max_instances")            // 多开上限(0=不限)
         private val K_AGENT_LINK = booleanPreferencesKey("agent_link_enabled")      // Agent 联动插件总线
         private val K_COLLISION = booleanPreferencesKey("pet_collision")             // 多开碰撞物理
-        private val K_ISLAND_ENABLED = booleanPreferencesKey("island_enabled")       // 灵动岛
-        private val K_ISLAND_STYLE = stringPreferencesKey("island_style")            // dark/light/glass
-        private val K_ISLAND_EMOJI = stringPreferencesKey("island_emoji")            // 图标
-        private val K_ISLAND_TEXT = stringPreferencesKey("island_text")              // 自定义文本
-        private val K_ISLAND_X = intPreferencesKey("island_x")                       // 位置记忆
-        private val K_ISLAND_Y = intPreferencesKey("island_y")
+        private val K_PET_NAME = stringPreferencesKey("pet_name")                     // 宠物名称
+        private val K_POWER_SAVE = booleanPreferencesKey("power_save")               // 省电模式
+        private val K_CLICK_SQUASH = booleanPreferencesKey("click_squash")           // 点击 Q 弹
         private val K_THROW_STRENGTH = stringPreferencesKey("throw_strength")  // 甩出力度档位
         private val K_SOUND_VOLUME = intPreferencesKey("sound_volume")        // 音效音量
         private val K_CLICK_TALK = stringPreferencesKey("click_talk")          // 点击台词绑定
@@ -131,6 +128,8 @@ class PetConfig(private val ctx: Context) {
         private val K_INSTANCE_COUNT = intPreferencesKey("spawned_instance_count")
 
         const val DEFAULT_CHARACTER = "shenshen"
+        /** 默认宠物名称（可在设置里改，长按菜单标题显示） */
+        const val DEFAULT_PET_NAME = "小肥鱼"
         /** 默认系统提示词（人设）：设置页可改可清空，清空后不发送 system 消息 */
         const val DEFAULT_CHAT_SYSTEM_PROMPT =
             "你是「欧鲸鲸」，一只常年陪在主人身边的小肥鱼桌宠，自称小肥鱼。说话温和、口语化、简短，" +
@@ -240,17 +239,12 @@ class PetConfig(private val ctx: Context) {
     suspend fun setAgentLinkEnabled(v: Boolean) = set("agent_link_enabled", v)
     suspend fun collisionEnabled() = read(K_COLLISION, true)
     suspend fun setCollisionEnabled(v: Boolean) = set("pet_collision", v)
-    suspend fun islandEnabled() = read(K_ISLAND_ENABLED, false)
-    suspend fun setIslandEnabled(v: Boolean) = set("island_enabled", v)
-    suspend fun islandStyle() = read(K_ISLAND_STYLE, "dark")
-    suspend fun setIslandStyle(v: String) = set("island_style", v)
-    suspend fun islandEmoji() = read(K_ISLAND_EMOJI, "🐳")
-    suspend fun setIslandEmoji(v: String) = set("island_emoji", v)
-    suspend fun islandText() = read(K_ISLAND_TEXT, "")
-    suspend fun setIslandText(v: String) = set("island_text", v)
-    suspend fun islandX() = read(K_ISLAND_X, -1)
-    suspend fun islandY() = read(K_ISLAND_Y, -1)
-    suspend fun setIslandPos(x: Int, y: Int) { set("island_x", x); set("island_y", y) }
+    suspend fun petName() = read(K_PET_NAME, DEFAULT_PET_NAME).trim().ifBlank { DEFAULT_PET_NAME }.take(12)
+    suspend fun setPetName(v: String) = set("pet_name", v.trim().take(12))
+    suspend fun powerSave() = read(K_POWER_SAVE, false)
+    suspend fun setPowerSave(v: Boolean) = set("power_save", v)
+    suspend fun clickSquash() = read(K_CLICK_SQUASH, true)
+    suspend fun setClickSquash(v: Boolean) = set("click_squash", v)
     suspend fun throwStrength() = read(K_THROW_STRENGTH, "standard")
     suspend fun setThrowStrength(v: String) = set("throw_strength", v)
     suspend fun soundVolume() = read(K_SOUND_VOLUME, 100).coerceIn(0, 100)

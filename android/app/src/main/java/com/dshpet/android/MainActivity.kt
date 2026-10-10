@@ -361,6 +361,7 @@ private fun GeneralTab(ctx: android.content.Context, cfg: PetConfig, scope: kotl
     val autoStart by cfg.flowBool("autostart", false).collectAsState(initial = false)
     val hideRecents by cfg.flowBool("hide_from_recents", true).collectAsState(initial = true)
     val batteryOpt by cfg.flowBool("battery_optimization", false).collectAsState(initial = false)
+    val powerSave by cfg.flowBool("power_save", false).collectAsState(initial = false)
 
     val overlayLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         val granted = Settings.canDrawOverlays(ctx)
@@ -494,6 +495,12 @@ private fun GeneralTab(ctx: android.content.Context, cfg: PetConfig, scope: kotl
                     }
                 }
             }
+            SwitchRow(
+                "省电模式",
+                if (powerSave) "开启中：不自动散步、不自言自语、关闭多开碰撞；屏幕熄灭时彻底停摆"
+                else "开启后关闭自动散步/自言自语/多开碰撞，并在屏幕熄灭时停止渲染与全部定时任务",
+                powerSave,
+            ) { on -> scope.launch { cfg.setPowerSave(on) } }
         }
         Section("启动") {
             SettingRow(
@@ -529,6 +536,7 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
     val edgePeek by cfg.flowBool("edge_peek_enabled", false).collectAsState(initial = false)
     val clickBalance by cfg.flowBool("click_show_balance", false).collectAsState(initial = false)
     val clickSelfTalk by cfg.flowBool("click_show_self_talk", false).collectAsState(initial = false)
+    val clickSquash by cfg.flowBool("click_squash", true).collectAsState(initial = true)
 
     Column(Modifier.verticalScroll(rememberScrollState())) {
         Section("动作与移动") {
@@ -633,6 +641,11 @@ private fun BehaviorTab(ctx: android.content.Context, cfg: PetConfig, scope: kot
         }
         Section("点击互动") {
             SwitchRow("点击音效", "点击桌宠时的 Q 弹音效", clickSound) { on -> scope.launch { cfg.setClickSound(on) } }
+            SwitchRow(
+                "点击 Q 弹",
+                "点击时宠物会挤压回弹（GL 着色器实现，独立表面层上也能生效）",
+                clickSquash,
+            ) { on -> scope.launch { cfg.setClickSquash(on) } }
             // 音效自选（v2.0.0）：默认音效 / 鸭子音效
             Column(Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) {
                 Text("音效选择", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -773,10 +786,6 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
     val facing by cfg.flowString("facing", "left").collectAsState(initial = "left")
     val blur by cfg.flowBool("blur_enabled", false).collectAsState(initial = false)
     val bubbleStyle by cfg.flowString("self_talk_bubble_style", "classic_top").collectAsState(initial = "classic_top")
-    val islandEnabled by cfg.flowBool("island_enabled", false).collectAsState(initial = false)
-    val islandStyle by cfg.flowString("island_style", "dark").collectAsState(initial = "dark")
-    val islandEmoji by cfg.flowString("island_emoji", "🐳").collectAsState(initial = "🐳")
-    val islandText by cfg.flowString("island_text", "").collectAsState(initial = "")
     val selfTalk by cfg.flowBool("self_talk_enabled", false).collectAsState(initial = false)
     val stMin by cfg.flowInt("self_talk_min_interval", 20).collectAsState(initial = 20)
     // 自定义应用字体（TTF/OTF → filesDir/custom_font.ttf，全局应用）
@@ -854,37 +863,34 @@ private fun AppearanceTab(ctx: android.content.Context, cfg: PetConfig, scope: k
                 blur,
             ) { on -> scope.launch { cfg.setBlur(on) } }
         }
-        Section("灵动岛") {
-            SwitchRow("显示灵动岛", "胶囊悬浮窗：时间/自定义文本；点击切换桌宠显示/隐藏，可拖动、顶部吸附", islandEnabled) { on ->
-                scope.launch { cfg.setIslandEnabled(on) }
+        Section("宠物名字") {
+            // 名字显示在长按宠物菜单顶部；留空回退默认
+            val nameSaved by cfg.flowString("pet_name", PetConfig.DEFAULT_PET_NAME).collectAsState(initial = PetConfig.DEFAULT_PET_NAME)
+            var nameLocal by remember { mutableStateOf(nameSaved) }
+            var nameTip by remember { mutableStateOf(false) }
+            LaunchedEffect(nameSaved) { if (nameSaved != nameLocal && !nameTip) nameLocal = nameSaved }
+            LaunchedEffect(nameTip) {
+                if (nameTip) { kotlinx.coroutines.delay(2000); nameTip = false }
             }
-            Column(Modifier.padding(horizontal = 12.dp)) {
-                Text("风格", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("dark" to "深色", "light" to "浅色", "glass" to "玻璃").forEach { (id, label) ->
-                        FilterChip(
-                            selected = islandStyle == id,
-                            onClick = { scope.launch { cfg.setIslandStyle(id) } },
-                            label = { Text(label) },
-                        )
-                    }
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                Text(
+                    "给它起个名字（最多 12 字），长按宠物弹出的菜单顶部会显示这个名字",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                    OutlinedTextField(
+                        value = nameLocal,
+                        onValueChange = { if (it.length <= 12) nameLocal = it },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        placeholder = { Text(PetConfig.DEFAULT_PET_NAME, fontSize = 13.sp) },
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Button(onClick = {
+                        scope.launch { cfg.setPetName(nameLocal) }
+                        nameTip = true
+                    }) { Text(if (nameTip) "已保存" else "保存") }
                 }
-            }
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("图标", Modifier.width(90.dp), fontSize = 13.sp)
-                OutlinedTextField(
-                    value = islandEmoji, onValueChange = { if (it.length <= 4) scope.launch { cfg.setIslandEmoji(it) } },
-                    modifier = Modifier.width(90.dp),
-                    singleLine = true,
-                )
-                Spacer(Modifier.width(12.dp))
-                Text("文本", Modifier.width(40.dp), fontSize = 13.sp)
-                OutlinedTextField(
-                    value = islandText, onValueChange = { if (it.length <= 16) scope.launch { cfg.setIslandText(it) } },
-                    modifier = Modifier.weight(1f),
-                    singleLine = true,
-                    placeholder = { Text("自定义短文本", fontSize = 12.sp) },
-                )
             }
         }
         Section("自言自语气泡") {

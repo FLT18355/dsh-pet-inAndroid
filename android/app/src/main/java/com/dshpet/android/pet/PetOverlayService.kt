@@ -64,21 +64,19 @@ open class PetOverlayService : Service() {
         const val HUMMING_ANIM = "悠闲哼歌"
 
         // ---- 边缘探头 ----
-        /** 露出宽度（占窗口比例）：一半 */
-        const val PEEK_VIS_W = 0.50f
-        /** 探头斜角（度）：正值在屏幕上是逆时针（头往左倒）。
-         *  进入探头时左缘用 -PEEK_TILT（头朝屏内右倾）、右缘用 +PEEK_TILT（头朝左倾）。 */
-        const val PEEK_TILT = 45f
+        /** 露出宽度（占窗口比例）。0.55 = 切点在角色内容盒（30%~70%）之外一点点：
+         *  头完整可见，只裁掉外侧一小段身体。改成更小值会露得更少。 */
+        const val PEEK_VIS_W = 0.55f
+        /** 探头斜角（度，绝对值）：正值在屏幕上看是逆时针（头往左倒）。
+         *  进入探头时左缘用 -PEEK_TILT（头朝屏内右倾）、右缘用 +PEEK_TILT（头朝左倾）。
+         *  角度越大越"探头"，但旋转后需要等比缩小得越多（见 [PetVideoView.rotationFit]）。 */
+        const val PEEK_TILT = 30f
         /** 角色头部中心在画布上的纵向位置（用于补偿旋转带来的高度位移） */
         const val PEEK_HEAD_CY = 0.31f
 
         /** 进程级多开上限缓存（设置可调；0 = 无限制；PetApp 启动时同步） */
         @Volatile
         var maxInstances: Int = 4
-
-        /** 桌宠可见性（灵动岛单击切换） */
-        @Volatile
-        var petHidden = false
 
         /** 实例号 → 服务类（Android 同一 Service 类只有一个对象，
          *  多开必须用不同服务类隔离窗口/引擎状态） */
@@ -174,9 +172,14 @@ open class PetOverlayService : Service() {
     private var curClickSound = true
     internal var curClickSoundChoice = "default"
     internal var curEdgePeek = false
+    /** 点击 Q 弹（着色器挤压）开关 */
+    internal var curClickSquash = true
+    /** 省电模式：停自动散步/自言自语，屏幕熄灭时完全暂停桌宠 */
+    internal var curPowerSave = false
+    /** 屏幕是否熄灭（省电模式据此暂停渲染/定时器） */
+    private var screenOff = false
     private var curClickBalance = false
     private var curClickSelfTalk = false
-    private var visible = true
     private var consecutiveErrors = 0
     private var settingsJobs = mutableListOf<Job>()
 
@@ -203,26 +206,97 @@ open class PetOverlayService : Service() {
     private var lastMoveMs = 0L
 
     // ---- 定时器 ----
-    // 永续调度（空闲时只做空检查，开销可忽略）。原先条件不满足即停止且
+    /** 有活干时的 tick 间隔（移动/物理） */
+    private val activeTickMs = 33L
+    /** 空闲时的 tick 间隔：桌宠静止时不再每秒唤醒 30 次（降低 CPU 唤醒与耗电） */
+    private val idleTickMs = 120L
+    private var tickerPosted = false
+
+    // 永续调度（空闲时低频空检查）。原先条件不满足即停止且
     // 永不重启，导致物理拖动/后续自动走动的 tick 从未被调用。
     private val moveTicker = object : Runnable {
         override fun run() {
+            tickerPosted = false
+            if (screenOff) return   // 熄屏：完全停摆（亮屏时 onScreenOn 重新挂上）
+            var active = false
             // 动画间隔到点必须解除 gap 状态：否则一次动作/移动后
             // 引擎会永远停在待机/转向链（tickGap 原先无人调用）。
             engine.tickGap()
             if (engine.movePlanActive() || physMode != null) {
+                active = true
                 engine.tickMove()
                 tickPhysics()
             }
-            uiHandler.postDelayed(this, 33)
+            postTicker(if (active) activeTickMs else idleTickMs)
         }
     }
 
+    private fun postTicker(delayMs: Long) {
+        if (tickerPosted || screenOff) return
+        tickerPosted = true
+        uiHandler.postDelayed(moveTicker, delayMs)
+    }
+
+    /** 立刻唤醒 ticker（新动画/开始拖动/物理启动），避免空闲间隔带来的起步延迟 */
+    private fun wakeTicker() {
+        if (screenOff) return
+        if (tickerPosted) uiHandler.removeCallbacks(moveTicker)
+        tickerPosted = false
+        postTicker(activeTickMs)
+    }
+
     // ================================================================ 生命周期
+    /**
+     * 屏幕亮/灭监听（动态注册）：
+     * 熄屏后悬浮窗不可见 —— 停止解码/渲染与一切定时任务（最大的一项省电改进）；
+     * 亮屏后自动恢复。与「省电模式」开关无关（熄屏不渲染永远是对的）。
+     */
+    private val screenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            when (i?.action) {
+                Intent.ACTION_SCREEN_OFF -> onScreenOff()
+                Intent.ACTION_SCREEN_ON -> onScreenOn()
+            }
+        }
+    }
+
+    private fun onScreenOff() {
+        if (screenOff) return
+        screenOff = true
+        uiHandler.removeCallbacks(moveTicker)
+        tickerPosted = false
+        selfTalkRunnable?.let { uiHandler.removeCallbacks(it) }
+        squashAnim?.cancel()
+        if (this::videoView.isInitialized) {
+            runCatching { videoView.setSquash(1f, 1f) }
+            runCatching { videoView.pausePlay() }
+        }
+        AppLog.log("SVC", "熄屏：暂停桌宠动画与定时任务（省电）")
+    }
+
+    private fun onScreenOn() {
+        if (!screenOff) return
+        screenOff = false
+        if (this::videoView.isInitialized) runCatching { videoView.resumePlay() }
+        postTicker(activeTickMs)
+        scheduleSelfTalk()
+        AppLog.log("SVC", "亮屏：恢复桌宠")
+    }
+
     override fun onCreate() {
         super.onCreate()
         config = PetConfig.get(this)
         density = resources.displayMetrics.density
+        // 动态注册亮/灭屏（ACTION_SCREEN_ON/OFF 只能动态注册）
+        runCatching {
+            registerReceiver(
+                screenReceiver,
+                android.content.IntentFilter().apply {
+                    addAction(Intent.ACTION_SCREEN_OFF)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                },
+            )
+        }
         AppLog.log("SVC", "onCreate instance=$instanceId")
     }
 
@@ -242,9 +316,6 @@ open class PetOverlayService : Service() {
         startForeground(1000 + instanceId, buildNotification())
         when (intent?.action) {
             "quit" -> { quit(); return START_NOT_STICKY }
-            "hide" -> { setHidden(true); return START_NOT_STICKY }
-            "show" -> { setHidden(false); return START_NOT_STICKY }
-            "toggle_island" -> { toggleIsland(); return START_NOT_STICKY }
         }
         if (!Settings.canDrawOverlays(this)) {
             stopSelf()
@@ -287,6 +358,7 @@ open class PetOverlayService : Service() {
         synchronized(activeInstances) { activeInstances.remove(instanceId) }
         // 先停掉一切定时器/协程：否则 ticker 会在窗口已移除后继续 updateViewLayout
         uiHandler.removeCallbacksAndMessages(null)
+        runCatching { unregisterReceiver(screenReceiver) }
         // 必须在 scope.cancel() 之前：savePosition 内部走 scope.launch
         // （engine 未初始化时不能碰，否则会记一条无意义异常）
         if (this::engine.isInitialized) savePosition()
@@ -295,7 +367,6 @@ open class PetOverlayService : Service() {
         // 先关掉所有子窗口（菜单/气泡/灵动岛/聊天/快捷对话）
         removeMenu()
         bubble?.dismiss()
-        stopIsland()
         stopQuickChat()
         dismissChat()
         // 释放顺序：先停解码器并断开视频输出，再移除窗口（触发 GL 线程退出）。
@@ -401,6 +472,9 @@ open class PetOverlayService : Service() {
         curClickSoundChoice = config.clickSoundChoice()
         // 功能开关：边缘探头
         curEdgePeek = config.edgePeekEnabled()
+        // 点击 Q 弹（着色器挤压）与省电模式
+        curClickSquash = config.clickSquash()
+        curPowerSave = config.powerSave()
         // 点击台词绑定（上游 v4.1.0）
         curClickTalk = config.clickTalk()
         curThrowStrength = config.throwStrength()
@@ -422,16 +496,17 @@ open class PetOverlayService : Service() {
         observeSettings()
 
         // 启动动画链
+        // 实例可能是在熄屏状态下被拉起来的（开机自启/通知）：先同步一次屏幕状态，
+        // 否则 ticker 与解码会在熄屏时白跑（亮屏时 onScreenOn 会恢复）。
+        screenOff = runCatching {
+            !(getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
+        }.getOrDefault(false)
         engine.start()
-        uiHandler.postDelayed(moveTicker, 33)
+        if (screenOff) videoView.pausePlay()
+        postTicker(activeTickMs)
 
         // Agent 联动插件总线（上游统一事件协议；默认关，设置开启）
         if (config.agentLinkEnabled()) startAgentBus()
-
-        // 灵动岛（设置开启则随主实例启动）
-        if (instanceId == 0 && config.islandEnabled()) {
-            island = DynamicIsland(this).also { it.show() }
-        }
 
         // 多开碰撞物理（上游"鱼塘碰碰车"；默认开）
         collisionMember = CollisionHub.Member(
@@ -439,7 +514,7 @@ open class PetOverlayService : Service() {
             x = engine.winX.toDouble(), y = engine.winY.toDouble(),
             w = engine.winW, h = engine.winH,
         ).also { m ->
-            CollisionHub.setEnabled(curCollision)
+            applyCollisionEnabled()
             CollisionHub.register(m)
             // 碰撞结算写回：本实例被撞 → 更新窗口/被撞飞进入抛掷
             CollisionHub.setOnMoved(instanceId) { member ->
@@ -452,6 +527,7 @@ open class PetOverlayService : Service() {
                             physPos = doubleArrayOf(member.x, member.y)
                             physVel = doubleArrayOf(member.vx, member.vy)
                             physMode = "throw"
+                            wakeTicker()
                         } else {
                             moveWindow(member.x.roundToInt(), member.y.roundToInt())
                             savePosition()
@@ -478,7 +554,6 @@ open class PetOverlayService : Service() {
     }
 
     private var collisionMember: CollisionHub.Member? = null
-    private var island: DynamicIsland? = null
     private var quickChat: QuickChat? = null
 
     /** 双击间隔（毫秒）内二连击 → 快速对话 */
@@ -490,40 +565,6 @@ open class PetOverlayService : Service() {
     private var slingshotAnchorY = 0f
     private var curThrowStrength = "standard"
     internal var curClickTalk = ""
-
-    /** 桌宠显示/隐藏（灵动岛单击；仅主实例处理） */
-    private fun setHidden(hidden: Boolean) {
-        if (instanceId != 0) return
-        petHidden = hidden
-        visible = !hidden
-        val c = container
-        if (c != null) {
-            uiHandler.post { c.visibility = if (hidden) View.GONE else View.VISIBLE }
-            if (hidden) videoView.pausePlay() else videoView.resumePlay()
-            AppLog.log("SVC", "桌宠 ${if (hidden) "隐藏" else "显示"}")
-        }
-    }
-
-    /** 灵动岛单击：桌宠显示/隐藏切换（同进程直调，见 DynamicIsland.togglePet） */
-    fun togglePetHidden() {
-        if (instanceId != 0) return
-        setHidden(!petHidden)
-    }
-
-    fun toggleIsland() {
-        if (instanceId != 0) return
-        if (island == null) {
-            island = DynamicIsland(this).also { it.show() }
-        } else {
-            island?.dismiss()
-            island = null
-        }
-    }
-
-    private fun stopIsland() {
-        island?.dismiss()
-        island = null
-    }
 
     private fun toggleQuickChat() {
         if (quickChat?.isShowing() == true) {
@@ -579,7 +620,8 @@ open class PetOverlayService : Service() {
     // ================================================================ 自言自语
     private fun scheduleSelfTalk() {
         selfTalkRunnable?.let { uiHandler.removeCallbacks(it) }
-        if (!curSelfTalk) return
+        // 省电模式 / 熄屏：不排自言自语（也不留残余定时器）
+        if (!curSelfTalk || curPowerSave || screenOff) return
         val min = curSelfTalkMinSec.coerceAtLeast(5)
         val max = curSelfTalkMaxSec.coerceAtLeast(min)
         val delay = (min + kotlin.random.Random.nextDouble() * (max - min)) * 1000
@@ -589,6 +631,30 @@ open class PetOverlayService : Service() {
         }
         selfTalkRunnable = r
         uiHandler.postDelayed(r, delay.toLong())
+    }
+
+    /**
+     * 省电模式开关：
+     * - 停自动散步（[syncAnimLocks] 里并入 noMove）与自言自语；
+     * - 停多开碰撞物理（33ms 的 O(n²) 检测是纯耗电）；
+     * - 跟「熄屏暂停」叠加：熄屏时任何模式下都会彻底停摆（见 [onScreenOff]）。
+     */
+    private fun applyPowerSave(on: Boolean) {
+        curPowerSave = on
+        if (on && this::engine.isInitialized) {
+            engine.cancelMove()
+            physMode = null
+            selfTalkRunnable?.let { uiHandler.removeCallbacks(it) }
+        }
+        applyCollisionEnabled()
+        if (this::engine.isInitialized) syncAnimLocks()
+        scheduleSelfTalk()
+        showBubble(if (on) "省电模式已开启：桌宠不再自己乱跑，熄屏后彻底休息" else "省电模式已关闭", 3500)
+    }
+
+    /** 碰撞物理是否生效（设置开关 && 非省电模式；多开实例共享同一总开关） */
+    private fun applyCollisionEnabled() {
+        CollisionHub.setEnabled(curCollision && !curPowerSave)
     }
 
     private fun showRandomSelfTalk() {
@@ -655,8 +721,10 @@ open class PetOverlayService : Service() {
             val path = catalog.files[name] ?: return
             videoView.play(name, path, curSpeed.toFloat())
             videoView.setMirror(engine.shouldMirror(name))
-            // 隐藏时不播（省电）：显示时恢复
-            if (!visible) videoView.pausePlay()
+            // 新动画可能马上要走位（移动链）：立刻唤醒 ticker，避免空闲间隔的起步延迟
+            wakeTicker()
+            // 熄屏期间不播（省电）：亮屏时恢复
+            if (screenOff) videoView.pausePlay()
         } catch (e: Throwable) {
             AppLog.log("PLAY", "playAnimation($name) 异常: ${e.message}")
         }
@@ -683,6 +751,7 @@ open class PetOverlayService : Service() {
                     physVel = doubleArrayOf(0.0, 0.0)
                     physMode = null
                     engine.cancelMove()
+                    wakeTicker()
                     // 长按菜单（默认 500ms；"仅长按可拖动"时同样先长按）。
                     // 锁定位置时也必须保留长按：否则菜单打不开，用户无法再解锁。
                     uiHandler.removeCallbacks(longPressRunnable)
@@ -739,11 +808,15 @@ open class PetOverlayService : Service() {
                         if (curPhysics) {
                             val now = System.currentTimeMillis()
                             trail.add(Triple(now, ev.rawX, ev.rawY))
+                            // 原地剔除过期采样（原先每次 filter 都新建一个 List）
                             val cutoff = now - (PetEngine.TRAIL_KEEP_SEC * 1000).toLong()
-                            trail = trail.filter { it.first >= cutoff }.toMutableList()
+                            while (trail.size > 2 && trail.first().first < cutoff) {
+                                trail.removeAt(0)
+                            }
                             dragTargetX = (ev.rawX - grabOffsetX).toInt()
                             dragTargetY = (ev.rawY - grabOffsetY).toInt()
                             physMode = "drag"
+                            wakeTicker()
                         } else {
                             moveWindow(
                                 (ev.rawX - grabOffsetX).toInt(),
@@ -782,6 +855,7 @@ open class PetOverlayService : Service() {
                             }
                             dragging = false
                             pressActive = false
+                            wakeTicker()
                             return@setOnTouchListener true
                         }
                         if (curPhysics) {
@@ -793,6 +867,7 @@ open class PetOverlayService : Service() {
                             } else {
                                 physVel = doubleArrayOf(vx, vy)
                                 physMode = "throw"
+                                wakeTicker()
                             }
                         } else {
                             savePosition()
@@ -852,14 +927,25 @@ open class PetOverlayService : Service() {
     // ================================================================ Q 弹
     private var squashAnim: android.animation.ValueAnimator? = null
 
+    /**
+     * 点击 Q 弹：绕脚底中心的"挤压 → 回弹"阻尼振荡。
+     *
+     * 形变**由 GL 顶点着色器完成**（[PetVideoView.setSquash]）：本视图是
+     * `setZOrderOnTop(true)` 的独立 Surface 层，View 的 scaleX/scaleY（旧实现）
+     * 在这层上不生效 —— 旧版"Q 弹"实际上什么也看不到，这就是重写的原因。
+     */
     private fun squash() {
+        if (!curClickSquash) return
         squashAnim?.cancel()
-        videoView.pivotX = videoView.width / 2f
-        videoView.pivotY = videoView.height.toFloat()
-        val anim = android.animation.ValueAnimator.ofFloat(1f, 0.78f, 1.06f, 1f).apply {
-            duration = 240
+        val anim = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 320
             addUpdateListener {
-                videoView.scaleY = it.animatedValue as Float
+                val t = it.animatedValue as Float
+                // 阻尼振荡：sin 起止均为 0（结束时精确复原），振幅按 e^-4.5t 衰减
+                val amp = Math.exp(-4.5 * t).toFloat()
+                val s = kotlin.math.sin(t * (Math.PI * 3.0)).toFloat()
+                val d = 0.11f * amp * s
+                videoView.setSquash(1f + d, 1f - d)
             }
         }
         squashAnim = anim
@@ -899,13 +985,14 @@ open class PetOverlayService : Service() {
     }
 
     /**
-     * 进入探头状态：宠物贴在屏幕左/右缘，只露出**左半 / 右半**身体，并呈 ±45° 斜角
-     * （贴左缘头朝屏内右倾、贴右缘朝左倾），像从屏幕边斜着探头张望。
+     * 进入探头状态：宠物贴在屏幕左/右缘，露出约 55% 宽度（切点落在角色内容盒之外，
+     * **头完整**、只裁掉外侧一小段身体），并以 ±30° 斜角探向屏内。
      *
-     * 位置就是最初那版"窗口移出屏幕、露出 50% 宽度"的做法（纵向保持桌宠当前高度，
+     * 位置就是"窗口移出屏幕、露出 PEEK_VIS_W 比例宽度"的做法（纵向保持桌宠当前高度，
      * 不下坠）；旋转**由 GL 着色器完成**（[PetVideoView.setRotationDegrees]）——
      * 本视图是 zOrderOnTop 的独立 Surface 层，View.rotation 不生效还会造成拉伸，
-     * 不能用。旋转绕窗口中心（≈角色身体中心），因此剪切线是斜的、头自然进屏内。
+     * 不能用。着色器同时按 [PetVideoView.rotationFit] 等比缩小，
+     * 避免 16:9 窗口把旋转后的画面斜着裁掉（旧版"头被斜切一半"的根因）。
      * 期间引擎强制 idleOnly（只播待机动画）、禁止自动移动，并临时忽略碰撞推挤。
      */
     private fun enterPeek(toLeft: Boolean) {
@@ -925,7 +1012,7 @@ open class PetOverlayService : Service() {
         val (sw, _) = screenPx()
         val ww = engine.winW
         val wh = engine.winH
-        val visW = (ww * PEEK_VIS_W).toInt()   // 露出宽度 = 窗口一半
+        val visW = (ww * PEEK_VIS_W).toInt()   // 露出的窗口宽度（切点在角色内容盒之外，头完整）
         // 方向：贴左缘要"头朝屏内（右）"、贴右缘"头朝左"。
         // 注意着色器在裁剪空间旋转，而裁剪空间 y 轴朝上、与 View 坐标相反 ——
         // 正角度在屏幕上看是逆时针（头往左倒），所以这里左缘用**负角**。
@@ -934,8 +1021,11 @@ open class PetOverlayService : Service() {
         // 旋转绕窗口中心（= 角色身体中心），并补偿头部的纵向位移，避免高度跳变。
         videoView.setRotationDegrees(tilt)
         val rad = Math.toRadians(tilt.toDouble())
+        // 着色器旋转后会把内容等比缩小到 rotationFit（否则会被窗口斜切）：
+        // 头部位移的补偿必须用同一个系数，不然头会随旋转上下跳。
+        val fit = PetVideoView.rotationFit(ww.toFloat(), wh.toFloat(), tilt)
         val headDy = (PEEK_HEAD_CY - 0.5f) * wh      // 头部相对窗口中心的 y 偏移（负=在上方）
-        val dyShift = (headDy * Math.cos(rad) - headDy).toFloat()
+        val dyShift = (headDy * Math.cos(rad) * fit - headDy).toFloat()
         val x = if (toLeft) -(ww - visW) else sw - visW
         val y = (engine.winY - dyShift.toInt()).coerceIn(windowYRange())
         lp.x = x
@@ -1005,12 +1095,15 @@ open class PetOverlayService : Service() {
         // 溢出 clamp：鱼身视觉贴边（见 overflowX 注释）
         val cx = xPx.coerceIn(windowXRange())
         val cy = yPx.coerceIn(windowYRange())
+        val moved = cx != engine.winX || cy != engine.winY
         lp.x = cx
         lp.y = cy
         runCatching { wm.updateViewLayout(c, lp) }
         collisionMember?.let {
             it.x = cx.toDouble(); it.y = cy.toDouble()
             it.w = engine.winW; it.h = engine.winH
+            // 真有位移才唤醒碰撞结算（碰撞 hub 在全员静止时会退避到 200ms）
+            if (moved) CollisionHub.wake()
         }
         engine.syncPosition(cx, cy)
         // 气泡跟随桌宠（自言自语气泡锚定在桌宠上/下方，必须一起移动）
@@ -1112,13 +1205,16 @@ open class PetOverlayService : Service() {
         watch(c.flowBool("drag_physics", false)) { v -> curPhysics = v as Boolean }
         watch(c.flowBool("pet_collision", true)) { v ->
             curCollision = v as Boolean
-            CollisionHub.setEnabled(curCollision)
+            applyCollisionEnabled()
         }
-        watch(c.flowBool("island_enabled", false)) { v ->
-            if (instanceId == 0) {
-                if (v as Boolean) toggleIsland() else stopIsland()
-            }
+        // 省电模式：停自动散步/自言自语/碰撞，熄屏时彻底停摆
+        watch(c.flowBool("power_save", false)) { v ->
+            val on = v as Boolean
+            if (on == curPowerSave) return@watch
+            applyPowerSave(on)
         }
+        // 点击 Q 弹（着色器挤压）
+        watch(c.flowBool("click_squash", true)) { v -> curClickSquash = v as Boolean }
         watch(c.flowBool("agent_link_enabled", false)) { v ->
             if (v as Boolean) startAgentBus() else stopAgentBus()
         }
@@ -1298,13 +1394,6 @@ open class PetOverlayService : Service() {
         }
     }
 
-    fun toggleVisible() {
-        visible = !visible
-        container?.visibility = if (visible) View.VISIBLE else View.GONE
-        if (visible) videoView.resumePlay() else videoView.pausePlay()
-        bubble?.hide()
-    }
-
     /** 回到右下角（默认角落） */
     fun returnToCorner() {
         val (sw, sh) = screenPx()
@@ -1331,7 +1420,6 @@ open class PetOverlayService : Service() {
             bubble?.dismiss()
             stopQuickChat()
             dismissChat()
-            stopIsland()
         }
         stopSelf()
     }
@@ -1379,8 +1467,10 @@ open class PetOverlayService : Service() {
      */
     internal fun syncAnimLocks() {
         if (!this::engine.isInitialized) return
-        val p = music ?: return
-        val hum = p.isPlaying() && !peeking && engine.hasAnim(HUMMING_ANIM)
+        // 音乐播放器可能尚未创建（initPet 早期 / 懒创建失败）：此时一律按"无音乐"处理，
+        // 否则会提前 return，导致 noMove（含省电模式/探头）永远同步不到引擎。
+        val p = music
+        val hum = p != null && p.isPlaying() && !peeking && engine.hasAnim(HUMMING_ANIM)
         engine.humActive = hum
         if (hum != humApplied) {
             humApplied = hum
@@ -1391,7 +1481,7 @@ open class PetOverlayService : Service() {
                 engine.switchToIdle()
             }
         }
-        engine.noMove = curNoMove || peeking || hum
+        engine.noMove = curNoMove || peeking || hum || curPowerSave
     }
 
     // ---- 长按菜单音乐控制（左右键切歌 / 播放暂停 / 指定曲目）----

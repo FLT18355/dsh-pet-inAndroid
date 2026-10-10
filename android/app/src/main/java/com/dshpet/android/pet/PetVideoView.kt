@@ -60,6 +60,9 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     private var uMLoc = 0
     private var uCosLoc = 0
     private var uSinLoc = 0
+    private var uSqXLoc = 0
+    private var uSqYLoc = 0
+    private var uFitLoc = 0
     private var uHalfLoc = 0
     private var mirror = false
     /**
@@ -71,6 +74,9 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
     @Volatile private var rotDeg = 0f
     @Volatile private var rotCos = 1f
     @Volatile private var rotSin = 0f
+    /** Q 弹挤压（着色器）：绕脚底中心缩放，(1,1) = 原样 */
+    @Volatile private var sqX = 1f
+    @Volatile private var sqY = 1f
     private val stMatrix = FloatArray(16)
 
     private var ready = false
@@ -138,6 +144,11 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             uMLoc = GLES20.glGetUniformLocation(program, "uM")
             uCosLoc = GLES20.glGetUniformLocation(program, "uCos")
             uSinLoc = GLES20.glGetUniformLocation(program, "uSin")
+            uSqXLoc = GLES20.glGetUniformLocation(program, "uSquash[0]").let {
+                if (it >= 0) it else GLES20.glGetUniformLocation(program, "uSquash")
+            }
+            uSqYLoc = if (uSqXLoc >= 0) uSqXLoc + 1 else -1
+            uFitLoc = GLES20.glGetUniformLocation(program, "uFit")
             uHalfLoc = GLES20.glGetUniformLocation(program, "uHalf")
 
             val st = SurfaceTexture(textureId)
@@ -210,6 +221,9 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             // 像素空间的等比旋转（视口半宽/半高）：uCos/uSin = 1/0 时即原样不旋转
             GLES20.glUniform1f(uCosLoc, rotCos)
             GLES20.glUniform1f(uSinLoc, rotSin)
+            GLES20.glUniform1f(uSqXLoc, sqX)
+            GLES20.glUniform1f(uSqYLoc, sqY)
+            GLES20.glUniform1f(uFitLoc, rotationFit(width.toFloat(), height.toFloat(), rotDeg))
             val hw = width / 2f
             val hh = height / 2f
             GLES20.glUniform2f(uHalfLoc, if (hw > 0f) hw else 1f, if (hh > 0f) hh else 1f)
@@ -284,6 +298,18 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         val rad = Math.toRadians(deg.toDouble())
         rotCos = Math.cos(rad).toFloat()
         rotSin = Math.sin(rad).toFloat()
+        requestRender()
+    }
+
+    /**
+     * Q 弹挤压（着色器实现，绕脚底中心缩放）。
+     * 本视图是 zOrderOnTop 的独立 Surface 层：View.scaleX/scaleY 不会生效（同 rotation），
+     * 所以形变必须做在顶点着色器里。参数 (1,1) = 原样。
+     */
+    fun setSquash(sx: Float, sy: Float) {
+        if (sqX == sx && sqY == sy) return
+        sqX = sx
+        sqY = sy
         requestRender()
     }
 
@@ -363,6 +389,29 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
 
     companion object {
 
+        /** 素材画布中"角色内容盒"（与桌面端常量一致）：x 30%~70%、y 8%~92% */
+        const val CONTENT_W = 0.40f
+        const val CONTENT_H = 0.88f
+
+        /**
+         * 旋转 [deg] 度后，把"角色内容盒"完整装进 w×h 视口所需的等比缩放（≤1）。
+         *
+         * 为什么需要：窗口是 16:9，直接在后处理里旋转整幅画布时，旋转后的外接矩形
+         * 比窗口高得多，会被窗口边界斜着切掉一大块 —— 这正是旧版探头"头被斜切一半"
+         * 的根因。按**内容盒**（而不是整幅透明画布）求最小缩放，宠物几乎不缩水。
+         */
+        fun rotationFit(w: Float, h: Float, deg: Float): Float {
+            if (deg == 0f || w <= 0f || h <= 0f) return 1f
+            val rad = Math.toRadians(deg.toDouble())
+            val c = kotlin.math.abs(Math.cos(rad)).toFloat()
+            val s = kotlin.math.abs(Math.sin(rad)).toFloat()
+            val cw = w * CONTENT_W
+            val ch = h * CONTENT_H
+            val ex = cw * c + ch * s
+            val ey = cw * s + ch * c
+            return minOf(1f, w / ex, h / ey)
+        }
+
         private val QUAD: FloatBuffer = ByteBuffer.allocateDirect(4 * 2 * 4)
             .order(ByteOrder.nativeOrder()).asFloatBuffer().apply {
                 put(floatArrayOf(
@@ -384,12 +433,19 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             uniform float uCos;
             uniform float uSin;
             uniform vec2 uHalf;
+            uniform vec2 uSquash;
+            uniform float uFit;
             varying vec2 vUV;
             void main() {
                 vUV = (uM * vec4(aPos * 0.5 + 0.5, 0.0, 1.0)).xy;
                 vec2 p = aPos * uHalf;
-                vec2 r = vec2(p.x * uCos - p.y * uSin, p.x * uSin + p.y * uCos);
-                gl_Position = vec4(r / uHalf, 0.0, 1.0);
+                // uFit：旋转后等比缩小，保证"角色内容盒"仍完整落在窗口内
+                vec2 r = vec2(p.x * uCos - p.y * uSin, p.x * uSin + p.y * uCos) * uFit;
+                // Q 弹挤压：绕"脚底中心"（像素空间 (0, -halfH)）缩放，形变时脚不离地。
+                // uSquash = (1,1) 即原样，不影响正常动画。
+                vec2 pivot = vec2(0.0, -uHalf.y);
+                vec2 s = pivot + (r - pivot) * uSquash;
+                gl_Position = vec4(s / uHalf, 0.0, 1.0);
             }
         """
 
