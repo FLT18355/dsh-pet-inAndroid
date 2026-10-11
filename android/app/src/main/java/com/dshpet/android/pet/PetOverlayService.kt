@@ -940,27 +940,89 @@ open class PetOverlayService : Service() {
 
     // ================================================================ Q 弹
     private var squashAnim: android.animation.ValueAnimator? = null
+    private var squashPathLogged = false
 
     /**
-     * 点击 Q 弹：绕脚底中心的"挤压 → 回弹"阻尼振荡。
+     * 点击 Q 弹：先"压扁变宽"、再回弹，阻尼振荡三拍。
      *
-     * 形变**由 GL 顶点着色器完成**（[PetVideoView.setSquash]）：本视图是
-     * `setZOrderOnTop(true)` 的独立 Surface 层，View 的 scaleX/scaleY（旧实现）
-     * 在这层上不生效 —— 旧版"Q 弹"实际上什么也看不到，这就是重写的原因。
+     * 形变有两条路（自动选择，两条都真真切切看得到）：
+     *  1) GL 顶点着色器（[PetVideoView.setSquash]）—— 首选，开销最小；
+     *  2) 改悬浮窗尺寸（把窗口压矮加宽，脚底中心锚点不动）—— 着色器不可用时兜底。
+     * 本视图是 `setZOrderOnTop(true)` 的独立 Surface 层：View 的 scaleX/scaleY 完全
+     * 不作用（旧版 Q 弹就是这么写成摆设的），所以只能走上面两条路。
+     *
+     * 纵向"压扁"给大、"拉长"给小：窗口是 16:9，拉长超过约 8% 会把头顶切掉。
      */
     private fun squash() {
         if (!curClickSquash) return
         squashAnim?.cancel()
+        val useGl = this::videoView.isInitialized && videoView.deformAvailable
+        if (!squashPathLogged) {
+            squashPathLogged = true
+            AppLog.log("Q弹", if (useGl) "使用 GL 着色器形变" else "GL 形变不可用，回退到窗口尺寸形变")
+        }
+        if (useGl) squashViaGl() else squashViaWindow()
+    }
+
+    /** 形变波形：(x 倍率, y 倍率)；t=0 与 t=1 都精确回到 (1,1) */
+    private fun squashAt(t: Float): Pair<Float, Float> {
+        val env = Math.exp(-2.2 * t).toFloat()
+        val wave = kotlin.math.sin(t * (Math.PI * 3.2)).toFloat()
+        return (1f + 0.15f * env * wave) to (1f - 0.07f * env * wave)
+    }
+
+    private fun squashViaGl() {
         val anim = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = 320
+            duration = 360
             addUpdateListener {
-                val t = it.animatedValue as Float
-                // 阻尼振荡：sin 起止均为 0（结束时精确复原），振幅按 e^-4.5t 衰减
-                val amp = Math.exp(-4.5 * t).toFloat()
-                val s = kotlin.math.sin(t * (Math.PI * 3.0)).toFloat()
-                val d = 0.11f * amp * s
-                videoView.setSquash(1f + d, 1f - d)
+                val (sx, sy) = squashAt(it.animatedValue as Float)
+                videoView.setSquash(sx, sy)
             }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    // 波形末端不一定是 0：这里强制精确复原
+                    if (this@PetOverlayService::videoView.isInitialized) videoView.setSquash(1f, 1f)
+                }
+            })
+        }
+        squashAnim = anim
+        anim.start()
+    }
+
+    /** 兜底：窗口尺寸形变（脚底中心锚点不动），动画结束精确复原 */
+    private fun squashViaWindow() {
+        val lp = params ?: return
+        val c = container ?: return
+        val baseW = engine.winW
+        val baseH = engine.winH
+        val baseX = engine.winX
+        val baseY = engine.winY
+        fun apply(w: Int, h: Int, x: Int, y: Int) {
+            lp.width = w.coerceAtLeast(16)
+            lp.height = h.coerceAtLeast(16)
+            lp.x = x
+            lp.y = y
+            runCatching { wm.updateViewLayout(c, lp) }
+            collisionMember?.let { m ->
+                m.w = lp.width; m.h = lp.height
+                m.x = x.toDouble(); m.y = y.toDouble()
+            }
+        }
+        val anim = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 360
+            addUpdateListener {
+                val (sx, sy) = squashAt(it.animatedValue as Float)
+                val w = (baseW * sx).toInt()
+                val h = (baseH * sy).toInt()
+                apply(w, h, baseX - (w - baseW) / 2, baseY - (h - baseH))
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    // 位置以引擎当前值为准：动画期间桌宠可能正好在散步（moveWindow 改过位置），
+                    // 用旧位置复原会出现"跳一下"。
+                    apply(baseW, baseH, engine.winX, engine.winY)
+                }
+            })
         }
         squashAnim = anim
         anim.start()
@@ -1387,6 +1449,20 @@ open class PetOverlayService : Service() {
                 },
                 onFailure = { showBubble("余额查询失败：${it.message}", 7000) },
             )
+        }
+    }
+
+    /**
+     * 清除缓存（长按菜单 → 功能页「存储」/ 设置 → 关于）：清空缓存目录与历史日志，
+     * 不动设置、已上传音乐、自定义字体。清完用气泡回报释放的空间。
+     */
+    fun clearCache() {
+        scope.launch {
+            val r = withContext(Dispatchers.IO) {
+                com.dshpet.android.util.CacheCleaner.clear(this@PetOverlayService)
+            }
+            AppLog.log("CACHE", "清除缓存：释放 ${r.freedBytes}B（缓存 ${r.cacheBytes}B / 日志 ${r.logBytes}B）")
+            showBubble("已清除缓存：释放 ${com.dshpet.android.util.CacheCleaner.fmt(r.freedBytes)}", 4000)
         }
     }
 

@@ -152,6 +152,10 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
             uSinLoc = GLES20.glGetUniformLocation(program, "uSin")
             uSqXLoc = GLES20.glGetUniformLocation(program, "uSquash")
             uFitLoc = GLES20.glGetUniformLocation(program, "uFit")
+            com.dshpet.android.util.AppLog.log(
+                "GL",
+                "uniform 位置: uSquash=$uSqXLoc uFit=$uFitLoc uCos=$uCosLoc（-1 = 驱动未保留该 uniform，形变会退化）"
+            )
             uHalfLoc = GLES20.glGetUniformLocation(program, "uHalf")
 
             val st = SurfaceTexture(textureId)
@@ -307,6 +311,13 @@ class PetVideoView(context: Context) : GLSurfaceView(context) {
         rotSin = Math.sin(rad).toFloat()
         requestRender()
     }
+
+    /**
+     * GL 侧的形变（旋转/Q 弹挤压）是否可用：着色器编译链接成功且 uniform 被保留。
+     * 不可用时调用方应改用"改窗口尺寸"的兜底做法，否则用户会看到"点了没反应"。
+     */
+    val deformAvailable: Boolean
+        get() = program != 0 && uSqXLoc >= 0 && uFitLoc >= 0
 
     /**
      * Q 弹挤压（着色器实现，绕脚底中心缩放）。

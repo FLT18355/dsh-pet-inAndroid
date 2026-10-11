@@ -98,6 +98,7 @@ import com.dshpet.android.pet.Balance
 import com.dshpet.android.pet.PetOverlayService
 import com.dshpet.android.pet.Updater
 import com.dshpet.android.ui.theme.DshPetTheme
+import com.dshpet.android.util.CacheCleaner
 import com.dshpet.android.util.mdBlur
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -1282,6 +1283,26 @@ private fun AboutTab(ctx: android.content.Context, cfg: PetConfig, scope: kotlin
                     }
                 }) { Text("检查") }
             }, onClick = { updateInfo?.let { if (it.contains("下载页")) runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(Updater.RELEASES_URL))) } } })
+        }
+        Section("存储") {
+            var cacheSize by remember { mutableStateOf<Long?>(null) }
+            var cacheMsg by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(Unit) {
+                cacheSize = withContext(Dispatchers.IO) { CacheCleaner.size(ctx) }
+            }
+            SettingRow(
+                "清除缓存",
+                cacheMsg ?: "缓存目录与历史日志约 ${cacheSize?.let { CacheCleaner.fmt(it) } ?: "…"}；设置 / 音乐 / 字体不受影响",
+                trailing = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            val freed = withContext(Dispatchers.IO) { CacheCleaner.clear(ctx).freedBytes }
+                            cacheMsg = "已清除，释放 ${CacheCleaner.fmt(freed)}"
+                            cacheSize = withContext(Dispatchers.IO) { CacheCleaner.size(ctx) }
+                        }
+                    }) { Text("清除") }
+                },
+            )
         }
         Section("链接") {
             SettingRow("GitHub 仓库与 Releases", subtitle = Updater.RELEASES_URL, onClick = {

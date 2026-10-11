@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Check
@@ -69,6 +70,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.dshpet.android.data.PetConfig
 import com.dshpet.android.ui.theme.DshPetTheme
+import com.dshpet.android.util.AppLog
+import com.dshpet.android.util.CacheCleaner
 import com.dshpet.android.util.ProvideComposeHost
 import com.dshpet.android.util.attachComposeHost
 import com.dshpet.android.util.mdBlur
@@ -201,8 +204,8 @@ class PetMenu(
             service.scope.launch { action() }
         }
 
-        // 功能面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
-        androidx.compose.runtime.LaunchedEffect(funcOpen, musicOpen) {
+        // 面板开合后窗口尺寸变化 → 等下一帧布局完成后重新定位（紧贴桌宠、不超屏）
+        androidx.compose.runtime.LaunchedEffect(funcOpen, musicOpen, speedOpen, sizeOpen) {
             androidx.compose.runtime.withFrameNanos { }
             view?.post { locate() }
         }
@@ -292,7 +295,11 @@ class PetMenu(
                         }
                     }
                     HorizontalDivider(Modifier.padding(horizontal = 12.dp))
-                    if (funcOpen) {
+                    if (speedOpen) {
+                        SpeedPanel(blurOn, onBack = { speedOpen = false }, run = run)
+                    } else if (sizeOpen) {
+                        SizePanel(blurOn, onBack = { sizeOpen = false }, run = run)
+                    } else if (funcOpen) {
                         FuncPanel(cfg, blurOn, onBack = { funcOpen = false }, run, runKeep)
                     } else if (musicOpen) {
                         MusicPanel(blurOn, onBack = { musicOpen = false }, runKeep = runKeep)
@@ -312,10 +319,14 @@ class PetMenu(
                         // ---- 播放 ----
                         MenuGroup("播放")
                         MenuItem(Icons.Filled.PlayArrow, "动画集") { animHubOpen = true }
-                        MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") { speedOpen = !speedOpen; sizeOpen = false }
-                        SpeedSubmenu(speedOpen) { v -> run { cfg.setPlaybackSpeed(v) } }
-                        MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(menuPetScale)) { sizeOpen = !sizeOpen; speedOpen = false }
-                        SizeSubmenu(sizeOpen, menuPetScale) { v -> run { cfg.setScale(v) } }
+                        MenuItem(Icons.Filled.Refresh, "播放速度", badge = "${service.curSpeed}×") {
+                            AppLog.log("MENU", "open speed panel")
+                            speedOpen = true; sizeOpen = false
+                        }
+                        MenuItem(Icons.Filled.Home, "大小", badge = if (service.curMouseThrough || service.curLock) "—" else sizeLabel(menuPetScale)) {
+                            AppLog.log("MENU", "open size panel")
+                            sizeOpen = true; speedOpen = false
+                        }
                         // ---- 音乐（当前播放 + 左右键切歌）----
                         MenuGroup("音乐")
                         MusicBar(runKeep)
@@ -456,6 +467,20 @@ class PetMenu(
                     }
                 }
                 MenuItem(Icons.Filled.Add, "生小肥鱼（多开）") { run { service.spawnPet() } }
+                // ---- 存储 ----
+                MenuGroup("存储")
+                var cacheBytes by remember { mutableStateOf<Long?>(null) }
+                androidx.compose.runtime.LaunchedEffect(Unit) {
+                    cacheBytes = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { CacheCleaner.size(ctx) }.getOrDefault(0L)
+                    }
+                }
+                MenuItem(
+                    Icons.Filled.Delete, "清除缓存",
+                    badge = cacheBytes?.let { CacheCleaner.fmt(it) } ?: "…",
+                ) {
+                    run { service.clearCache() }
+                }
             }
         }
     }
@@ -751,39 +776,107 @@ class PetMenu(
     }
 
     @Composable
-    private fun SpeedSubmenu(open: Boolean, onPick: (Double) -> Unit) {
-        if (!open) return
-        listOf(1.0, 1.25, 1.5, 1.75, 2.0).forEach { v ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onPick(v) }
-                    .padding(start = 36.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
-            ) {
-                Text("${v}×", fontSize = 12.sp)
-                if (service.curSpeed == v) {
-                    Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.width(16.dp))
-                }
+    private fun SpeedPanel(
+        blurOn: Boolean,
+        onBack: () -> Unit,
+        run: (suspend () -> Unit) -> Unit,
+    ) {
+        PanelShell(blurOn, title = "播放速度", onBack = onBack) {
+            MenuGroup("选择倍速")
+            listOf(1.0, 1.25, 1.5, 1.75, 2.0).forEach { v ->
+                ChoiceItem("${v}×", service.curSpeed == v) { run { cfgSetSpeed(v) } }
             }
+            Text(
+                "当前：${service.curSpeed}×（设置 → 桌宠 → 动作与移动 里还有动画间隔可调）",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            )
         }
     }
 
     @Composable
-    private fun SizeSubmenu(open: Boolean, currentScale: Double, onPick: (Double) -> Unit) {
-        if (!open) return
-        listOf(0.5, 0.72, 0.85, 1.0).forEach { v ->
-            Row(
+    private fun SizePanel(
+        blurOn: Boolean,
+        onBack: () -> Unit,
+        run: (suspend () -> Unit) -> Unit,
+    ) {
+        val cur by remember { PetConfig.get(ctx).flowDouble("scale", 0.72) }
+            .collectAsState(initial = 0.72)
+        PanelShell(blurOn, title = "宠物大小", onBack = onBack) {
+            MenuGroup("选择大小")
+            listOf(0.5, 0.72, 0.85, 1.0).forEach { v ->
+                ChoiceItem(sizeLabel(v), kotlin.math.abs(cur - v) < 0.001) { run { cfgSetScale(v) } }
+            }
+            Text(
+                "当前：${sizeLabel(cur)}（拖动滑块可微调：设置 → 外观 → 大小与透明度）",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+            )
+        }
+    }
+
+    /** 面板外壳：与「功能 / 音乐列表」同款结构（标题栏可拖动、点「◀ 返回」回主菜单） */
+    @Composable
+    private fun PanelShell(
+        blurOn: Boolean,
+        title: String,
+        onBack: () -> Unit,
+        content: @Composable () -> Unit,
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            color = if (blurOn) Color(0xE6FFFFFF) else MaterialTheme.colorScheme.surface,
+            shadowElevation = 6.dp,
+            tonalElevation = 1.dp,
+        ) {
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onPick(v) }
-                    .padding(start = 36.dp, end = 14.dp, top = 5.dp, bottom = 5.dp),
+                    .padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(1.dp),
             ) {
-                Text(sizeLabel(v), fontSize = 12.sp)
-                if (kotlin.math.abs(currentScale - v) < 0.001) {
-                    Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.width(16.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                onWindowDrag(dragAmount.x, dragAmount.y)
+                            }
+                        }
+                        .clickable(onClick = onBack)
+                        .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("◀ 返回", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                    Text(
+                        title,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(start = 10.dp),
+                    )
                 }
+                HorizontalDivider(Modifier.padding(horizontal = 14.dp))
+                content()
             }
         }
+    }
+
+    /** 面板内的写入：走服务作用域（菜单关闭后仍会完成） */
+    private suspend fun cfgSetSpeed(v: Double) {
+        AppLog.log("MENU", "pick speed $v")
+        PetConfig.get(ctx).setPlaybackSpeed(v)
+    }
+
+    private suspend fun cfgSetScale(v: Double) {
+        AppLog.log("MENU", "pick size $v")
+        PetConfig.get(ctx).setScale(v)
     }
 
     @Composable
